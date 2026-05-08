@@ -21,4 +21,4 @@ Thumbs.db
 # Agent data
 *.db
 *.log
-agent.log
+*.jsonl
