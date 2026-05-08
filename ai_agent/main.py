@@ -90,11 +90,17 @@ def create_agent(
     return agent
 
 
+# 模块级流式状态，供 _print_step 跨迭代重置
+_stream_state = {"started": False}
+
+
 def _print_step(event: str, data: dict) -> None:
     """实时打印 Agent 思考过程"""
     if event == "start":
+        _stream_state["started"] = False
         print(f"\n{'─' * 40}")
     elif event == "planning":
+        _stream_state["started"] = False
         steps = data.get("steps", [])
         if steps:
             print(f"\n📋 任务规划 ({len(steps)} 步):")
@@ -102,24 +108,44 @@ def _print_step(event: str, data: dict) -> None:
                 print(f"   {s['id']}. {s['description']}")
             print()
     elif event == "token":
-        # 流式 token — 由 on_token 回调处理，这里不做额外输出
-        pass
+        pass  # 流式 token 由 on_token 处理
     elif event == "thinking":
         content = data.get("content", "")
         iteration = data.get("iteration", 0)
-        # 流式模式下 token 已经实时显示过了，这里只做摘要
-        if "tool_call" in content:
-            print(f"  🔧 [{iteration}] 决定调用工具...")
-        elif len(content) <= 200:
-            # 非流式模式：完整显示
-            print(f"  💭 [{iteration}] {content}")
-        else:
-            print(f"  💭 [{iteration}] {content[:200]}...")
+        tool_calls = data.get("tool_calls", [])
+
+        if tool_calls:
+            if content and not content.startswith("{"):
+                # 有推理文本（流式已显示），补充工具调用说明
+                if _stream_state["started"]:
+                    print()
+                    _stream_state["started"] = False
+                print(f"  💭 [{iteration}] 决定调用: {', '.join(t['name'] for t in tool_calls)}")
+            else:
+                # 原生 function calling：content 为空或纯 JSON
+                if _stream_state["started"]:
+                    print()
+                    _stream_state["started"] = False
+                tool_descs = []
+                for t in tool_calls:
+                    args = t.get("arguments", {})
+                    args_brief = ", ".join(f"{k}={str(v)[:40]}" for k, v in args.items())
+                    tool_descs.append(f"{t['name']}({args_brief})" if args_brief else t['name'])
+                print(f"  💭 [{iteration}] 分析后决定调用工具: {', '.join(tool_descs)}")
+        elif content:
+            if _stream_state["started"]:
+                print()
+                _stream_state["started"] = False
+            if len(content) <= 200:
+                print(f"  💭 [{iteration}] {content}")
+            else:
+                print(f"  💭 [{iteration}] {content[:200]}...")
     elif event == "acting":
+        _stream_state["started"] = False
         tool = data.get("tool", "")
         args = data.get("arguments", {})
         args_str = ", ".join(f"{k}={v}" for k, v in args.items())
-        print(f"\n  🔧 调用: {tool}({args_str})")
+        print(f"  🔧 调用: {tool}({args_str})")
     elif event == "observing":
         tool = data.get("tool", "")
         result = data.get("result", "")
@@ -130,16 +156,14 @@ def _print_step(event: str, data: dict) -> None:
 
 
 def _make_stream_printer():
-    """创建一个带状态的流式打印回调"""
-    state = {"started": False, "iteration": 0}
-
+    """创建一个带状态的流式打印回调（共享 _stream_state）"""
     def on_token(token: str) -> None:
-        if not state["started"]:
+        if not _stream_state["started"]:
             print("\n💭 ", end="", flush=True)
-            state["started"] = True
+            _stream_state["started"] = True
         print(token, end="", flush=True)
 
-    return on_token, state
+    return on_token
 
 
 def interactive_mode(agent: Agent) -> None:
@@ -188,14 +212,15 @@ def interactive_mode(agent: Agent) -> None:
             continue
 
         # 执行（带流式思考过程显示）
-        stream_print, stream_state = _make_stream_printer()
-        agent.on_token = stream_print
+        _stream_state["started"] = False
+        agent.on_token = _make_stream_printer()
 
         result = agent.run(user_input)
 
         # 流式结束后换行
-        if stream_state["started"]:
+        if _stream_state["started"]:
             print()
+            _stream_state["started"] = False
 
         print(f"\n{'─' * 40}")
         print(f"✅ Agent: {result.answer}")
@@ -276,7 +301,7 @@ def main():
         return
 
     # 创建 Agent（交互模式默认流式）
-    stream_print, stream_state = _make_stream_printer()
+    stream_print = _make_stream_printer()
     agent = create_agent(
         model=args.model,
         host=args.host,
@@ -295,11 +320,12 @@ def main():
         print(f"模型: {args.model}")
         print("-" * 40)
         # 单次查询也使用流式
-        stream_single, stream_single_state = _make_stream_printer()
-        agent.on_token = stream_single
+        _stream_state["started"] = False
+        agent.on_token = _make_stream_printer()
         result = agent.run(args.query)
-        if stream_single_state["started"]:
+        if _stream_state["started"]:
             print()
+            _stream_state["started"] = False
         print(f"\n{result.answer}")
         print(f"\n(耗时 {result.elapsed_seconds:.1f}s, {result.iterations} 轮)")
     else:

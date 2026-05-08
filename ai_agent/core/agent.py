@@ -318,18 +318,22 @@ class Agent:
             step.thought = response.content
             steps.append(step)
 
-            # --- 回调：思考 ---
-            self._emit("thinking", {
-                "iteration": iteration,
-                "content": response.content,
-            })
-
             # 2b. 解析工具调用
             tool_calls = response.tool_calls
 
             # 如果 LLM 原生不支持 tool_calls，用正则解析
             if not tool_calls:
                 tool_calls = ToolCallParser.parse(response.content)
+
+            # --- 回调：思考（包含工具调用信息） ---
+            self._emit("thinking", {
+                "iteration": iteration,
+                "content": response.content,
+                "tool_calls": [
+                    {"name": tc["name"], "arguments": tc.get("arguments", {})}
+                    for tc in tool_calls
+                ],
+            })
 
             if tool_calls:
                 # 2c. 执行工具
