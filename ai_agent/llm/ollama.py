@@ -453,7 +453,10 @@ class OllamaLLM(BaseLLM):
     # ----------------------------------------------------------
 
     def _log_request(self, messages: list[dict], tools: list[dict] | None) -> None:
-        """记录 LLM 请求日志"""
+        """记录 LLM 请求日志（同时保存原始请求到 JSONL）"""
+        # 保存原始请求（不受日志级别影响）
+        self._save_raw_request(messages, tools)
+
         if not logger.isEnabledFor(logging.DEBUG):
             return
         # 取最后几条消息（用户输入 + 最近的上下文）
@@ -475,6 +478,23 @@ class OllamaLLM(BaseLLM):
             f"usage={response.usage}"
         )
         self._save_raw_response(response)
+
+    def _save_raw_request(self, messages: list[dict], tools: list[dict] | None) -> None:
+        """保存原始 LLM 请求到 JSONL 文件"""
+        if not self.response_log_path:
+            return
+        tool_names = None
+        if tools:
+            tool_names = [t.get("function", t).get("name", str(t)) for t in tools]
+        entry = {
+            "type": "request",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "model": self._model,
+            "message_count": len(messages),
+            "messages": messages,
+            "tools": tool_names,
+        }
+        self._write_jsonl(entry)
 
     def _save_raw_response(self, response: LLMResponse) -> None:
         """保存原始 LLM 响应到 JSONL 文件"""
