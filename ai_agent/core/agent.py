@@ -200,7 +200,19 @@ class Agent:
         config: AgentConfig | None = None,
         llm: BaseLLM | None = None,
         tool_registry: ToolRegistry | None = None,
+        on_step: Callable[[str, dict], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ):
+        """
+        Args:
+            config: Agent 配置
+            llm: LLM 实例
+            tool_registry: 工具注册表
+            on_step: 步骤回调 (event_type, data) -> None
+                     event_type: "planning" | "thinking" | "acting" | "observing" | "done" | "token"
+            on_token: 流式 token 回调 (token: str) -> None
+                     设置后将使用流式模式，在 LLM 推理时逐 token 推送
+        """
         self.config = config or AgentConfig()
 
         # LLM
@@ -238,6 +250,8 @@ class Agent:
 
         self.state = AgentState.IDLE
         self.current_plan: Plan | None = None
+        self.on_step = on_step
+        self.on_token = on_token
 
     # ----------------------------------------------------------
     # 公开接口
@@ -265,6 +279,9 @@ class Agent:
         if "没有找到相关记忆" not in relevant_memories:
             logger.info(f"长期记忆检索: {relevant_memories[:200]}")
 
+        # --- 回调：开始处理 ---
+        self._emit("start", {"query": user_input})
+
         # Step 1: 判断是否需要规划
         if self.config.enable_planning and self.planner.should_plan(
             user_input, threshold=self.config.plan_threshold_complexity
@@ -274,6 +291,12 @@ class Agent:
             self.current_plan = self.planner.create_plan(user_input)
             self.working.current_task = user_input
             logger.info(f"规划完成: {self.current_plan.total_steps} 个步骤")
+            self._emit("planning", {
+                "steps": [
+                    {"id": s.id, "description": s.description}
+                    for s in self.current_plan.steps
+                ],
+            })
 
         # Step 2: ReAct 循环
         final_answer = ""
@@ -294,6 +317,12 @@ class Agent:
             step = AgentStep(iteration=iteration, state=AgentState.THINKING)
             step.thought = response.content
             steps.append(step)
+
+            # --- 回调：思考 ---
+            self._emit("thinking", {
+                "iteration": iteration,
+                "content": response.content,
+            })
 
             # 2b. 解析工具调用
             tool_calls = response.tool_calls
@@ -317,6 +346,12 @@ class Agent:
                     step.action = f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)})"
                     logger.info(f"  Act -> {tool_name}")
 
+                    # --- 回调：行动 ---
+                    self._emit("acting", {
+                        "tool": tool_name,
+                        "arguments": tool_args,
+                    })
+
                     # 执行工具
                     result = self.tool_registry.execute(tool_name, tool_args)
 
@@ -326,6 +361,12 @@ class Agent:
                         f"[工具: {tool_name}]\n输入: {json.dumps(tool_args, ensure_ascii=False)}\n输出: {result}"
                     )
                     step.observation = result
+
+                    # --- 回调：观察 ---
+                    self._emit("observing", {
+                        "tool": tool_name,
+                        "result": result,
+                    })
 
                     # 记录到记忆
                     self.short_term.add_tool_result(tool_name, result)
@@ -359,6 +400,7 @@ class Agent:
                 final_answer = response.content
                 self.short_term.add_assistant(final_answer)
                 step.state = AgentState.DONE
+                self._emit("done", {"answer": final_answer})
                 break
 
             # 检查计划是否全部完成
@@ -369,6 +411,7 @@ class Agent:
                     summary_response = self._call_llm(summary_messages)
                     final_answer = summary_response.content
                     self.short_term.add_assistant(final_answer)
+                    self._emit("done", {"answer": final_answer})
                     break
 
         # 如果达到最大迭代次数还未结束
@@ -389,6 +432,14 @@ class Agent:
             iterations=len(steps),
             elapsed_seconds=elapsed,
         )
+
+    def _emit(self, event: str, data: dict) -> None:
+        """触发步骤回调"""
+        if self.on_step:
+            try:
+                self.on_step(event, data)
+            except Exception as e:
+                logger.debug(f"回调异常: {e}")
 
     def add_tool(self, func: Callable) -> None:
         """添加自定义工具（被 @tool 装饰的函数）"""
@@ -491,7 +542,10 @@ class Agent:
             return "任务已达到最大执行轮次，部分步骤可能未完成。请尝试简化请求后重试。"
 
     def _call_llm(self, messages: list[dict]) -> LLMResponse:
-        """调用 LLM，带重试"""
+        """调用 LLM（非流式），带重试。如果设置了 on_token 则自动切换流式"""
+        if self.on_token:
+            return self._call_llm_stream(messages)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -508,6 +562,49 @@ class Agent:
                     return response
             except Exception as e:
                 logger.error(f"LLM 调用失败 (尝试 {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    return LLMResponse(content=f"抱歉，LLM 调用失败: {e}")
+
+        return LLMResponse(content="抱歉，暂时无法处理你的请求。")
+
+    def _call_llm_stream(self, messages: list[dict]) -> LLMResponse:
+        """流式调用 LLM，逐 token 推送"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                tools = self.tool_registry.to_ollama_schemas()
+                full_content = ""
+                final_tool_calls: list[dict] = []
+                final_usage: dict = {}
+
+                for event in self.llm.chat_stream(messages, tools=tools if tools else None):
+                    if event.type == "token":
+                        full_content += event.content
+                        self.on_token(event.content)
+                        # 同时触发 on_step 的 token 事件
+                        self._emit("token", {"content": event.content})
+                    elif event.type == "done":
+                        full_content = event.content or full_content
+                        final_tool_calls = event.tool_calls
+                        final_usage = event.usage
+
+                if full_content or final_tool_calls:
+                    return LLMResponse(
+                        content=full_content,
+                        tool_calls=final_tool_calls,
+                        usage=final_usage,
+                    )
+
+                if attempt < max_retries - 1:
+                    logger.warning(f"LLM 流式返回空响应，重试 {attempt + 2}/{max_retries}")
+                    time.sleep(1)
+                else:
+                    return LLMResponse(content=full_content, tool_calls=final_tool_calls)
+
+            except Exception as e:
+                logger.error(f"LLM 流式调用失败 (尝试 {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
                     time.sleep(2)
                 else:

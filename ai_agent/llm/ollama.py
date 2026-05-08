@@ -4,15 +4,17 @@ Ollama LLM 集成
 支持两种模式：
 1. 原生 Ollama API (推荐)
 2. OpenAI 兼容 API (/v1/chat/completions)
+
+均支持流式 (stream) 和非流式两种调用方式。
 """
 
 import json
 import logging
-from typing import Any
+from typing import Any, Generator
 
 import requests
 
-from ai_agent.llm.base import BaseLLM, LLMResponse
+from ai_agent.llm.base import BaseLLM, LLMResponse, StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +45,22 @@ class OllamaLLM(BaseLLM):
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
-        """发送聊天请求到 Ollama"""
+        """发送聊天请求到 Ollama（非流式）"""
         if self.use_openai_compat:
             return self._chat_openai_compat(messages, tools)
         else:
             return self._chat_native(messages, tools)
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """流式聊天请求，逐 token 返回"""
+        if self.use_openai_compat:
+            yield from self._chat_stream_openai_compat(messages, tools)
+        else:
+            yield from self._chat_stream_native(messages, tools)
 
     def _chat_native(
         self,
@@ -167,6 +180,191 @@ class OllamaLLM(BaseLLM):
                 content=f"调用 LLM 失败: {e}",
                 tool_calls=[],
             )
+
+    # ----------------------------------------------------------
+    # 流式实现
+    # ----------------------------------------------------------
+
+    def _chat_stream_native(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """Ollama 原生 API 流式请求（NDJSON）"""
+        url = f"{self.host}/api/chat"
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
+        }
+        if tools:
+            payload["tools"] = tools
+
+        full_content = ""
+        last_message: dict = {}
+
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    message = chunk.get("message", {})
+                    last_message = message
+                    token = message.get("content", "")
+                    if token:
+                        full_content += token
+                        yield StreamEvent(type="token", content=token)
+
+                    if chunk.get("done", False):
+                        tool_calls = self._parse_tool_calls(
+                            last_message.get("tool_calls", [])
+                        )
+                        yield StreamEvent(
+                            type="done",
+                            content=full_content.strip(),
+                            tool_calls=tool_calls,
+                            usage={
+                                "prompt_tokens": chunk.get("prompt_eval_count", 0),
+                                "completion_tokens": chunk.get("eval_count", 0),
+                            },
+                        )
+                        return
+
+        except requests.RequestException as e:
+            logger.error(f"Ollama 流式请求失败: {e}")
+            yield StreamEvent(
+                type="done",
+                content=f"调用 LLM 失败: {e}",
+            )
+
+    def _chat_stream_openai_compat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """OpenAI 兼容 API 流式请求（SSE）"""
+        url = f"{self.host}/v1/chat/completions"
+
+        # 转换 tool 格式
+        openai_tools = None
+        if tools:
+            openai_tools = []
+            for tool in tools:
+                openai_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool["description"],
+                        "parameters": tool.get("parameters", {}),
+                    },
+                })
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if openai_tools:
+            payload["tools"] = openai_tools
+
+        full_content = ""
+        tool_call_chunks: dict[int, dict] = {}  # index -> {id, name, arguments_str}
+        usage = {}
+        finish_reason = "stop"
+
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]  # 去掉 "data: " 前缀
+                    if data_str == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if "usage" in chunk:
+                        usage = chunk["usage"]
+
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    if choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
+
+                    delta = choices[0].get("delta", {})
+                    token = delta.get("content", "")
+                    if token:
+                        full_content += token
+                        yield StreamEvent(type="token", content=token)
+
+                    # 累积 tool_calls（流式模式下分多个 chunk 传输）
+                    for tc in delta.get("tool_calls", []):
+                        idx = tc.get("index", 0)
+                        if idx not in tool_call_chunks:
+                            tool_call_chunks[idx] = {
+                                "id": "",
+                                "name": "",
+                                "arguments_str": "",
+                            }
+                        entry = tool_call_chunks[idx]
+                        if tc.get("id"):
+                            entry["id"] = tc["id"]
+                        func = tc.get("function", {})
+                        if func.get("name"):
+                            entry["name"] += func["name"]
+                        if func.get("arguments"):
+                            entry["arguments_str"] += func["arguments"]
+
+        except requests.RequestException as e:
+            logger.error(f"OpenAI-compat 流式请求失败: {e}")
+            yield StreamEvent(
+                type="done",
+                content=f"调用 LLM 失败: {e}",
+            )
+            return
+
+        # 解析累积的 tool_calls
+        tool_calls = []
+        for entry in tool_call_chunks.values():
+            try:
+                args = json.loads(entry["arguments_str"])
+            except (json.JSONDecodeError, KeyError):
+                args = {}
+            if entry["name"]:
+                tool_calls.append({
+                    "id": entry["id"],
+                    "name": entry["name"],
+                    "arguments": args,
+                })
+
+        yield StreamEvent(
+            type="done",
+            content=full_content.strip(),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage={
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            },
+        )
 
     def list_models(self) -> list[str]:
         """获取 Ollama 可用模型列表"""

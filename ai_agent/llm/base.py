@@ -3,7 +3,18 @@ LLM 抽象层
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Generator
+
+
+@dataclass
+class StreamEvent:
+    """流式响应事件"""
+    type: str  # "token" | "done"
+    content: str = ""  # token 文本 或 完整内容（done 时）
+    tool_calls: list[dict] = field(default_factory=list)  # done 时解析的工具调用
+    finish_reason: str = "stop"
+    usage: dict = field(default_factory=dict)
 
 
 class BaseLLM(ABC):
@@ -22,6 +33,30 @@ class BaseLLM(ABC):
             {"role": "assistant", "content": "...", "tool_calls": [...]}
         """
         ...
+
+    def chat_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """
+        流式聊天请求，逐 token 返回
+
+        Args:
+            messages: 消息列表
+            tools: 可选工具定义列表
+
+        Yields:
+            StreamEvent: type="token" 时逐字输出，type="done" 时包含完整结果
+        """
+        # 默认实现：一次性返回（子类可覆盖）
+        response = self.chat(messages, tools)
+        yield StreamEvent(
+            type="done",
+            content=response.content,
+            tool_calls=response.tool_calls,
+            usage=response.usage,
+        )
 
     @abstractmethod
     def list_models(self) -> list[str]:
