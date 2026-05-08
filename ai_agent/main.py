@@ -89,6 +89,7 @@ def create_agent(
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
+    response_log_path: str | None = None,
 ) -> Agent:
     """创建并配置 Agent"""
     config = AgentConfig(
@@ -102,6 +103,7 @@ def create_agent(
         model=model,
         host=host,
         temperature=temperature,
+        response_log_path=response_log_path,
     )
 
     # 创建工具注册表并注册内置工具
@@ -338,6 +340,13 @@ def main():
     # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
     setup_logging(verbose=args.verbose, log_file=args.log_file)
 
+    # 原始响应 JSONL 路径（从 --log-file 派生）
+    response_log_path = None
+    if args.log_file:
+        log_path = Path(args.log_file)
+        response_log_path = str(log_path.with_suffix(".jsonl"))
+        sys.stderr.write(f"📝 原始 LLM 响应: {response_log_path}\n")
+
     if args.list_models:
         list_models(args.host)
         return
@@ -351,6 +360,7 @@ def main():
         verbose=args.verbose,
         on_step=_print_step,
         on_token=stream_print if not args.query else None,  # 单次查询默认不流式
+        response_log_path=response_log_path,
     )
 
     if args.no_planning:

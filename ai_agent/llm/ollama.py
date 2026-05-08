@@ -6,10 +6,13 @@ Ollama LLM 集成
 2. OpenAI 兼容 API (/v1/chat/completions)
 
 均支持流式 (stream) 和非流式两种调用方式。
+支持将原始 LLM 响应保存到 JSONL 文件（response_log_path）。
 """
 
 import json
 import logging
+import os
+import time
 from typing import Any, Generator
 
 import requests
@@ -29,12 +32,28 @@ class OllamaLLM(BaseLLM):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         use_openai_compat: bool = False,
+        response_log_path: str | None = None,
     ):
+        """
+        Args:
+            model: Ollama 模型名
+            host: Ollama 服务地址
+            temperature: 生成温度
+            max_tokens: 最大 token 数
+            use_openai_compat: 使用 OpenAI 兼容 API
+            response_log_path: 原始响应 JSONL 文件路径（追加写入每条完整响应）
+        """
         self._model = model
         self.host = host.rstrip("/")
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.use_openai_compat = use_openai_compat
+        self.response_log_path = response_log_path
+        # 确保日志文件目录存在
+        if response_log_path:
+            log_dir = os.path.dirname(response_log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
 
     @property
     def model_name(self) -> str:
@@ -245,12 +264,17 @@ class OllamaLLM(BaseLLM):
                             "prompt_tokens": chunk.get("prompt_eval_count", 0),
                             "completion_tokens": chunk.get("eval_count", 0),
                         }
-                        # 记录流式响应日志
+                        # 记录流式响应日志并保存原始响应
                         logger.debug(
                             f"[LLM 响应] content={full_content[:300]!r}, "
                             f"tool_calls={[tc['name'] for tc in tool_calls]}, "
                             f"usage={usage}"
                         )
+                        self._save_raw_response(LLMResponse(
+                            content=full_content.strip(),
+                            tool_calls=tool_calls,
+                            usage=usage,
+                        ))
                         yield StreamEvent(
                             type="done",
                             content=full_content.strip(),
@@ -385,6 +409,13 @@ class OllamaLLM(BaseLLM):
             f"tool_calls={[tc['name'] for tc in tool_calls]}, "
             f"usage={final_usage}"
         )
+        # 保存原始响应
+        self._save_raw_response(LLMResponse(
+            content=full_content.strip(),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=final_usage,
+        ))
         yield StreamEvent(
             type="done",
             content=full_content.strip(),
@@ -419,6 +450,25 @@ class OllamaLLM(BaseLLM):
             f"tool_calls={[tc['name'] for tc in response.tool_calls]}, "
             f"usage={response.usage}"
         )
+        self._save_raw_response(response)
+
+    def _save_raw_response(self, response: LLMResponse) -> None:
+        """保存原始 LLM 响应到 JSONL 文件"""
+        if not self.response_log_path:
+            return
+        entry = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "model": self._model,
+            "content": response.content,
+            "tool_calls": response.tool_calls,
+            "finish_reason": response.finish_reason,
+            "usage": response.usage,
+        }
+        try:
+            with open(self.response_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning(f"保存原始响应失败: {e}")
 
     def list_models(self) -> list[str]:
         """获取 Ollama 可用模型列表"""
