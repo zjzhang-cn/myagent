@@ -89,7 +89,9 @@ def create_agent(
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
+    on_thinking: callable = None,
     response_log_path: str | None = None,
+    enable_thinking: bool = False,
 ) -> Agent:
     """创建并配置 Agent"""
     config = AgentConfig(
@@ -104,6 +106,7 @@ def create_agent(
         host=host,
         temperature=temperature,
         response_log_path=response_log_path,
+        enable_thinking=enable_thinking,
     )
 
     # 创建工具注册表并注册内置工具
@@ -125,6 +128,7 @@ def create_agent(
         tool_registry=registry,
         on_step=on_step,
         on_token=on_token,
+        on_thinking=on_thinking,
     )
 
     return agent
@@ -147,6 +151,9 @@ def _print_step(event: str, data: dict) -> None:
             for s in steps:
                 print(f"   {s['id']}. {s['description']}")
             print()
+    elif event == "thinking_token":
+        # 流式推理 token — 由 on_thinking 回调处理
+        pass
     elif event == "token":
         pass  # 流式 token 由 on_token 处理
     elif event == "thinking":
@@ -206,6 +213,19 @@ def _make_stream_printer():
     return on_token
 
 
+def _make_thinking_printer():
+    """创建一个推理（thinking）流式打印回调"""
+    state = {"started": False}
+
+    def on_thinking(token: str) -> None:
+        if not state["started"]:
+            print("\n🧠 ", end="", flush=True)
+            state["started"] = True
+        print(token, end="", flush=True)
+
+    return on_thinking, state
+
+
 def interactive_mode(agent: Agent) -> None:
     """交互式对话模式"""
     print("\n" + "=" * 60)
@@ -254,6 +274,9 @@ def interactive_mode(agent: Agent) -> None:
         # 执行（带流式思考过程显示）
         _stream_state["started"] = False
         agent.on_token = _make_stream_printer()
+        if agent.llm.enable_thinking:
+            thinking_p, thinking_s = _make_thinking_printer()
+            agent.on_thinking = thinking_p
 
         result = agent.run(user_input)
 
@@ -329,6 +352,18 @@ def main():
         help="禁用任务规划",
     )
     parser.add_argument(
+        "--think",
+        action="store_true",
+        default=False,
+        help="启用模型推理（think），支持推理的模型将在回复前输出思考过程",
+    )
+    parser.add_argument(
+        "--no-think",
+        action="store_true",
+        default=False,
+        help="禁用模型推理",
+    )
+    parser.add_argument(
         "--log-file",
         default=None,
         metavar="PATH",
@@ -351,16 +386,22 @@ def main():
         list_models(args.host)
         return
 
+    # 确定是否启用推理
+    enable_thinking = args.think and not args.no_think
+
     # 创建 Agent（交互模式默认流式）
     stream_print = _make_stream_printer()
+    thinking_print, thinking_state = _make_thinking_printer()
     agent = create_agent(
         model=args.model,
         host=args.host,
         temperature=args.temperature,
         verbose=args.verbose,
         on_step=_print_step,
-        on_token=stream_print if not args.query else None,  # 单次查询默认不流式
+        on_token=stream_print if not args.query else None,
+        on_thinking=thinking_print if (enable_thinking and not args.query) else None,
         response_log_path=response_log_path,
+        enable_thinking=enable_thinking,
     )
 
     if args.no_planning:

@@ -33,6 +33,7 @@ class OllamaLLM(BaseLLM):
         max_tokens: int = 4096,
         use_openai_compat: bool = False,
         response_log_path: str | None = None,
+        enable_thinking: bool = False,
     ):
         """
         Args:
@@ -42,6 +43,7 @@ class OllamaLLM(BaseLLM):
             max_tokens: 最大 token 数
             use_openai_compat: 使用 OpenAI 兼容 API
             response_log_path: 原始响应 JSONL 文件路径（追加写入每条完整响应）
+            enable_thinking: 启用模型推理（think 参数），支持推理的模型将返回 thinking 内容
         """
         self._model = model
         self.host = host.rstrip("/")
@@ -49,6 +51,7 @@ class OllamaLLM(BaseLLM):
         self.max_tokens = max_tokens
         self.use_openai_compat = use_openai_compat
         self.response_log_path = response_log_path
+        self.enable_thinking = enable_thinking
         # 确保日志文件目录存在
         if response_log_path:
             log_dir = os.path.dirname(response_log_path)
@@ -101,6 +104,8 @@ class OllamaLLM(BaseLLM):
 
         if tools:
             payload["tools"] = tools
+        if self.enable_thinking:
+            payload["think"] = True
 
         self._log_request(messages, tools)
 
@@ -111,6 +116,7 @@ class OllamaLLM(BaseLLM):
 
             message = data.get("message", {})
             content = message.get("content", "")
+            thinking = message.get("thinking", "")
 
             # 解析 tool_calls（Ollama 原生格式）
             tool_calls_raw = message.get("tool_calls", [])
@@ -118,6 +124,7 @@ class OllamaLLM(BaseLLM):
 
             result = LLMResponse(
                 content=content.strip() if content else "",
+                thinking=thinking.strip() if thinking else "",
                 tool_calls=tool_calls,
                 usage={
                     "prompt_tokens": data.get("prompt_eval_count", 0),
@@ -164,6 +171,8 @@ class OllamaLLM(BaseLLM):
         }
         if openai_tools:
             payload["tools"] = openai_tools
+        if self.enable_thinking:
+            payload["think"] = True
 
         self._log_request(messages, tools)
 
@@ -175,6 +184,7 @@ class OllamaLLM(BaseLLM):
             choice = data["choices"][0]
             message = choice.get("message", {})
             content = message.get("content", "")
+            thinking = message.get("thinking", "")
 
             # 解析 tool_calls（OpenAI 格式）
             tc_list = []
@@ -193,6 +203,7 @@ class OllamaLLM(BaseLLM):
 
             result = LLMResponse(
                 content=content.strip() if content else "",
+                thinking=thinking.strip() if thinking else "",
                 tool_calls=tc_list,
                 usage={
                     "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
@@ -232,8 +243,11 @@ class OllamaLLM(BaseLLM):
         }
         if tools:
             payload["tools"] = tools
+        if self.enable_thinking:
+            payload["think"] = True
 
         full_content = ""
+        full_thinking = ""
         last_message: dict = {}
 
         self._log_request(messages, tools)
@@ -251,6 +265,14 @@ class OllamaLLM(BaseLLM):
 
                     message = chunk.get("message", {})
                     last_message = message
+
+                    # 推理 token（thinking）
+                    think_token = message.get("thinking", "")
+                    if think_token:
+                        full_thinking += think_token
+                        yield StreamEvent(type="thinking", content=think_token)
+
+                    # 普通 token
                     token = message.get("content", "")
                     if token:
                         full_content += token
@@ -264,20 +286,22 @@ class OllamaLLM(BaseLLM):
                             "prompt_tokens": chunk.get("prompt_eval_count", 0),
                             "completion_tokens": chunk.get("eval_count", 0),
                         }
-                        # 记录流式响应日志并保存原始响应
                         logger.debug(
-                            f"[LLM 响应] content={full_content[:300]!r}, "
+                            f"[LLM 响应] thinking={full_thinking[:200]!r}, "
+                            f"content={full_content[:300]!r}, "
                             f"tool_calls={[tc['name'] for tc in tool_calls]}, "
                             f"usage={usage}"
                         )
                         self._save_raw_response(LLMResponse(
                             content=full_content.strip(),
+                            thinking=full_thinking.strip(),
                             tool_calls=tool_calls,
                             usage=usage,
                         ))
                         yield StreamEvent(
                             type="done",
                             content=full_content.strip(),
+                            thinking=full_thinking.strip(),
                             tool_calls=tool_calls,
                             usage=usage,
                         )
@@ -430,9 +454,6 @@ class OllamaLLM(BaseLLM):
 
     def _log_request(self, messages: list[dict], tools: list[dict] | None) -> None:
         """记录 LLM 请求日志"""
-        # 保存原始请求到 JSONL
-        self._save_raw_request(messages, tools)
-
         if not logger.isEnabledFor(logging.DEBUG):
             return
         # 取最后几条消息（用户输入 + 最近的上下文）
@@ -455,23 +476,6 @@ class OllamaLLM(BaseLLM):
         )
         self._save_raw_response(response)
 
-    def _save_raw_request(self, messages: list[dict], tools: list[dict] | None) -> None:
-        """保存原始 LLM 请求到 JSONL 文件"""
-        if not self.response_log_path:
-            return
-        tool_names = None
-        if tools:
-            tool_names = [t.get("function", t).get("name", str(t)) for t in tools]
-        entry = {
-            "type": "request",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "model": self._model,
-            "message_count": len(messages),
-            "messages": messages,
-            "tools": tool_names,
-        }
-        self._write_jsonl(entry)
-
     def _save_raw_response(self, response: LLMResponse) -> None:
         """保存原始 LLM 响应到 JSONL 文件"""
         if not self.response_log_path:
@@ -481,19 +485,12 @@ class OllamaLLM(BaseLLM):
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "model": self._model,
             "content": response.content,
+            "thinking": response.thinking,
             "tool_calls": response.tool_calls,
             "finish_reason": response.finish_reason,
             "usage": response.usage,
         }
         self._write_jsonl(entry)
-
-    def _write_jsonl(self, entry: dict) -> None:
-        """追加一行 JSON 到日志文件"""
-        try:
-            with open(self.response_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except OSError as e:
-            logger.warning(f"保存原始数据失败: {e}")
 
     def list_models(self) -> list[str]:
         """获取 Ollama 可用模型列表"""

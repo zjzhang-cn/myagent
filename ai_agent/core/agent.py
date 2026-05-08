@@ -202,6 +202,7 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         on_step: Callable[[str, dict], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ):
         """
         Args:
@@ -212,6 +213,8 @@ class Agent:
                      event_type: "planning" | "thinking" | "acting" | "observing" | "done" | "token"
             on_token: 流式 token 回调 (token: str) -> None
                      设置后将使用流式模式，在 LLM 推理时逐 token 推送
+            on_thinking: 流式推理回调 (thinking: str) -> None
+                     当模型支持 think 时，逐 token 推送推理内容
         """
         self.config = config or AgentConfig()
 
@@ -252,6 +255,7 @@ class Agent:
         self.current_plan: Plan | None = None
         self.on_step = on_step
         self.on_token = on_token
+        self.on_thinking = on_thinking
 
     # ----------------------------------------------------------
     # 公开接口
@@ -589,23 +593,31 @@ class Agent:
             try:
                 tools = self.tool_registry.to_ollama_schemas()
                 full_content = ""
+                full_thinking = ""
                 final_tool_calls: list[dict] = []
                 final_usage: dict = {}
 
                 for event in self.llm.chat_stream(messages, tools=tools if tools else None):
-                    if event.type == "token":
+                    if event.type == "thinking":
+                        full_thinking += event.content
+                        if self.on_thinking:
+                            self.on_thinking(event.content)
+                        self._emit("thinking_token", {"content": event.content})
+                    elif event.type == "token":
                         full_content += event.content
-                        self.on_token(event.content)
-                        # 同时触发 on_step 的 token 事件
+                        if self.on_token:
+                            self.on_token(event.content)
                         self._emit("token", {"content": event.content})
                     elif event.type == "done":
                         full_content = event.content or full_content
+                        full_thinking = event.thinking or full_thinking
                         final_tool_calls = event.tool_calls
                         final_usage = event.usage
 
-                if full_content or final_tool_calls:
+                if full_content or full_thinking or final_tool_calls:
                     return LLMResponse(
                         content=full_content,
+                        thinking=full_thinking,
                         tool_calls=final_tool_calls,
                         usage=final_usage,
                     )

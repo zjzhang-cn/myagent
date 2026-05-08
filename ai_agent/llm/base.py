@@ -10,8 +10,9 @@ from typing import Any, Generator
 @dataclass
 class StreamEvent:
     """流式响应事件"""
-    type: str  # "token" | "done"
-    content: str = ""  # token 文本 或 完整内容（done 时）
+    type: str  # "thinking" | "token" | "done"
+    content: str = ""  # token/thinking 文本 或 完整内容（done 时）
+    thinking: str = ""  # 完整推理内容（done 时）
     tool_calls: list[dict] = field(default_factory=list)  # done 时解析的工具调用
     finish_reason: str = "stop"
     usage: dict = field(default_factory=dict)
@@ -76,11 +77,13 @@ class LLMResponse:
     def __init__(
         self,
         content: str = "",
+        thinking: str = "",
         tool_calls: list[dict] | None = None,
         finish_reason: str = "stop",
         usage: dict | None = None,
     ):
         self.content = content
+        self.thinking = thinking
         self.tool_calls = tool_calls or []
         self.finish_reason = finish_reason
         self.usage = usage or {}
@@ -91,6 +94,7 @@ class LLMResponse:
     def __repr__(self):
         return (
             f"LLMResponse(content={self.content[:80]!r}, "
+            f"thinking={self.thinking[:40]!r}, "
             f"tool_calls={len(self.tool_calls)}, "
             f"finish={self.finish_reason})"
         )
