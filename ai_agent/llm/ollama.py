@@ -430,6 +430,9 @@ class OllamaLLM(BaseLLM):
 
     def _log_request(self, messages: list[dict], tools: list[dict] | None) -> None:
         """记录 LLM 请求日志"""
+        # 保存原始请求到 JSONL
+        self._save_raw_request(messages, tools)
+
         if not logger.isEnabledFor(logging.DEBUG):
             return
         # 取最后几条消息（用户输入 + 最近的上下文）
@@ -452,11 +455,29 @@ class OllamaLLM(BaseLLM):
         )
         self._save_raw_response(response)
 
+    def _save_raw_request(self, messages: list[dict], tools: list[dict] | None) -> None:
+        """保存原始 LLM 请求到 JSONL 文件"""
+        if not self.response_log_path:
+            return
+        tool_names = None
+        if tools:
+            tool_names = [t.get("function", t).get("name", str(t)) for t in tools]
+        entry = {
+            "type": "request",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "model": self._model,
+            "message_count": len(messages),
+            "messages": messages,
+            "tools": tool_names,
+        }
+        self._write_jsonl(entry)
+
     def _save_raw_response(self, response: LLMResponse) -> None:
         """保存原始 LLM 响应到 JSONL 文件"""
         if not self.response_log_path:
             return
         entry = {
+            "type": "response",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "model": self._model,
             "content": response.content,
@@ -464,11 +485,15 @@ class OllamaLLM(BaseLLM):
             "finish_reason": response.finish_reason,
             "usage": response.usage,
         }
+        self._write_jsonl(entry)
+
+    def _write_jsonl(self, entry: dict) -> None:
+        """追加一行 JSON 到日志文件"""
         try:
             with open(self.response_log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as e:
-            logger.warning(f"保存原始响应失败: {e}")
+            logger.warning(f"保存原始数据失败: {e}")
 
     def list_models(self) -> list[str]:
         """获取 Ollama 可用模型列表"""
