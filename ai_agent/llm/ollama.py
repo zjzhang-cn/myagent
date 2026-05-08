@@ -492,6 +492,14 @@ class OllamaLLM(BaseLLM):
         }
         self._write_jsonl(entry)
 
+    def _write_jsonl(self, entry: dict) -> None:
+        """追加一行 JSON 到日志文件"""
+        try:
+            with open(self.response_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as e:
+            logger.warning(f"保存原始数据失败: {e}")
+
     def list_models(self) -> list[str]:
         """获取 Ollama 可用模型列表"""
         try:
