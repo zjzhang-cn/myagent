@@ -14,6 +14,9 @@ AI Agent 主入口
 
     # 列出可用模型
     python -m ai_agent.main --list-models
+
+    # 启用日志文件（记录所有 LLM 交互）
+    python -m ai_agent.main --log-file agent.log "搜索新闻"
 """
 
 import argparse
@@ -35,13 +38,48 @@ from ai_agent.tools.builtin import (
 )
 from ai_agent.tools.registry import ToolRegistry
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger("ai_agent")
+
+
+def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
+    """配置日志系统
+
+    Args:
+        verbose: 设为 True 时启用 DEBUG 级别
+        log_file: 日志文件路径，设置后将 LLM 交互记录到文件
+    """
+    handlers: list[logging.Handler] = []
+
+    # 控制台 handler
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.DEBUG if verbose else logging.WARNING)
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    handlers.append(console)
+
+    # 文件 handler（记录所有 LLM 交互详情）
+    if log_file:
+        log_path = Path(log_file).expanduser().resolve()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        handlers.append(file_handler)
+        # 同时输出提示到 stderr
+        sys.stderr.write(f"📝 LLM 交互日志: {log_path}\n")
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose or log_file else logging.WARNING,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+        force=True,
+    )
 
 
 def create_agent(
@@ -288,13 +326,17 @@ def main():
         action="store_true",
         help="禁用任务规划",
     )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        metavar="PATH",
+        help="LLM 交互日志文件路径（记录所有请求/响应/工具调用）",
+    )
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    else:
-        logging.getLogger("ai_agent").setLevel(logging.WARNING)
+    # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
+    setup_logging(verbose=args.verbose, log_file=args.log_file)
 
     if args.list_models:
         list_models(args.host)

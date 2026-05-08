@@ -358,6 +358,10 @@ class Agent:
 
                     # 执行工具
                     result = self.tool_registry.execute(tool_name, tool_args)
+                    logger.debug(
+                        f"[工具执行] {tool_name}({json.dumps(tool_args, ensure_ascii=False)}) "
+                        f"-> {result[:300]!r}"
+                    )
 
                     # 2d. 观察阶段
                     self.state = AgentState.OBSERVING
@@ -504,6 +508,11 @@ class Agent:
         for msg in self.short_term.get_recent():
             messages.append(msg.to_dict())
 
+        logger.debug(
+            f"[构建消息] 共 {len(messages)} 条，"
+            f"system_prompt 长度={len(messages[0]['content'])}, "
+            f"plan={'有' if self.current_plan else '无'}"
+        )
         return messages
 
     def _build_summary_prompt(self) -> list[dict]:

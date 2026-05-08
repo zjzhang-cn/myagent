@@ -83,6 +83,8 @@ class OllamaLLM(BaseLLM):
         if tools:
             payload["tools"] = tools
 
+        self._log_request(messages, tools)
+
         try:
             resp = requests.post(url, json=payload, timeout=120)
             resp.raise_for_status()
@@ -95,7 +97,7 @@ class OllamaLLM(BaseLLM):
             tool_calls_raw = message.get("tool_calls", [])
             tool_calls = self._parse_tool_calls(tool_calls_raw)
 
-            return LLMResponse(
+            result = LLMResponse(
                 content=content.strip() if content else "",
                 tool_calls=tool_calls,
                 usage={
@@ -103,9 +105,11 @@ class OllamaLLM(BaseLLM):
                     "completion_tokens": data.get("eval_count", 0),
                 },
             )
+            self._log_response(result)
+            return result
         except requests.RequestException as e:
             logger.error(f"Ollama API 请求失败: {e}")
-            # 返回错误响应，让 Agent 处理
+            logger.debug(f"请求 URL: {url}, model: {self._model}")
             return LLMResponse(
                 content=f"调用 LLM 失败: {e}",
                 tool_calls=[],
@@ -142,6 +146,8 @@ class OllamaLLM(BaseLLM):
         if openai_tools:
             payload["tools"] = openai_tools
 
+        self._log_request(messages, tools)
+
         try:
             resp = requests.post(url, json=payload, timeout=120)
             resp.raise_for_status()
@@ -166,7 +172,7 @@ class OllamaLLM(BaseLLM):
                     "arguments": args,
                 })
 
-            return LLMResponse(
+            result = LLMResponse(
                 content=content.strip() if content else "",
                 tool_calls=tc_list,
                 usage={
@@ -174,8 +180,11 @@ class OllamaLLM(BaseLLM):
                     "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
                 },
             )
+            self._log_response(result)
+            return result
         except requests.RequestException as e:
             logger.error(f"Ollama OpenAI-compat API 请求失败: {e}")
+            logger.debug(f"请求 URL: {url}, model: {self._model}")
             return LLMResponse(
                 content=f"调用 LLM 失败: {e}",
                 tool_calls=[],
@@ -208,6 +217,8 @@ class OllamaLLM(BaseLLM):
         full_content = ""
         last_message: dict = {}
 
+        self._log_request(messages, tools)
+
         try:
             with requests.post(url, json=payload, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
@@ -230,19 +241,27 @@ class OllamaLLM(BaseLLM):
                         tool_calls = self._parse_tool_calls(
                             last_message.get("tool_calls", [])
                         )
+                        usage = {
+                            "prompt_tokens": chunk.get("prompt_eval_count", 0),
+                            "completion_tokens": chunk.get("eval_count", 0),
+                        }
+                        # 记录流式响应日志
+                        logger.debug(
+                            f"[LLM 响应] content={full_content[:300]!r}, "
+                            f"tool_calls={[tc['name'] for tc in tool_calls]}, "
+                            f"usage={usage}"
+                        )
                         yield StreamEvent(
                             type="done",
                             content=full_content.strip(),
                             tool_calls=tool_calls,
-                            usage={
-                                "prompt_tokens": chunk.get("prompt_eval_count", 0),
-                                "completion_tokens": chunk.get("eval_count", 0),
-                            },
+                            usage=usage,
                         )
                         return
 
         except requests.RequestException as e:
             logger.error(f"Ollama 流式请求失败: {e}")
+            logger.debug(f"请求 URL: {url}, model: {self._model}")
             yield StreamEvent(
                 type="done",
                 content=f"调用 LLM 失败: {e}",
@@ -279,6 +298,8 @@ class OllamaLLM(BaseLLM):
         }
         if openai_tools:
             payload["tools"] = openai_tools
+
+        self._log_request(messages, tools)
 
         full_content = ""
         tool_call_chunks: dict[int, dict] = {}  # index -> {id, name, arguments_str}
@@ -355,15 +376,48 @@ class OllamaLLM(BaseLLM):
                     "arguments": args,
                 })
 
+        final_usage = {
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+        }
+        logger.debug(
+            f"[LLM 流式响应] content={full_content[:300]!r}, "
+            f"tool_calls={[tc['name'] for tc in tool_calls]}, "
+            f"usage={final_usage}"
+        )
         yield StreamEvent(
             type="done",
             content=full_content.strip(),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            usage={
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-            },
+            usage=final_usage,
+        )
+
+    # ----------------------------------------------------------
+    # 日志辅助
+    # ----------------------------------------------------------
+
+    def _log_request(self, messages: list[dict], tools: list[dict] | None) -> None:
+        """记录 LLM 请求日志"""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        # 取最后几条消息（用户输入 + 最近的上下文）
+        recent = messages[-4:] if len(messages) > 4 else messages
+        parts = []
+        for msg in recent:
+            content = msg.get("content", "")[:200]
+            role = msg.get("role", "?")
+            parts.append(f"[{role}] {content!r}")
+        logger.debug(f"[LLM 请求] model={self._model}, msgs={len(messages)}, "
+                     f"tools={[t['function']['name'] if 'function' in t else t.get('name','?') for t in (tools or [])]}, "
+                     f"recent={' | '.join(parts)}")
+
+    def _log_response(self, response: LLMResponse) -> None:
+        """记录 LLM 响应日志"""
+        logger.debug(
+            f"[LLM 响应] content={response.content[:300]!r}, "
+            f"tool_calls={[tc['name'] for tc in response.tool_calls]}, "
+            f"usage={response.usage}"
         )
 
     def list_models(self) -> list[str]:
