@@ -57,14 +57,11 @@ class AgentConfig:
     shell_allow_all_commands: bool = False
     """设为 True 允许所有 Shell 命令（不推荐，有安全风险）"""
 
-    # 系统提示词
+    # 系统提示词（工具调用格式和计划指令由 Agent._build_messages() 动态注入）
     system_prompt: str = field(default_factory=lambda: (
         "你是一个智能 AI Agent，能够通过工具调用和规划来完成复杂任务。\n"
         "请用中文回复用户。\n"
-        "当你需要调用工具时，请严格使用以下 JSON 格式：\n"
-        '{"tool_call": {"name": "工具名", "arguments": {"参数名": "参数值"}}}\n'
-        "一次可以调用多个工具，用逗号分隔多个 JSON 对象。\n"
-        "如果不需要调用工具，直接回复用户即可。"
+        "完成所有步骤后，基于工具执行结果生成完整、有帮助的总结。"
     ))
 
     def __post_init__(self):

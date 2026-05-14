@@ -483,10 +483,11 @@ class Agent:
                         break
 
                     hint = (
-                        f"[系统提示] 当前任务计划尚未完成，共 {self.current_plan.total_steps} 步，"
-                        f"已完成 {self.current_plan.completed_steps} 步。"
-                        f"下一步应执行：{next_step.description}。"
-                        f"请调用相应的工具继续执行，不要直接回复文本。"
+                        f"⚠️ 计划尚未完成！你必须继续执行。\n"
+                        f"进度：{self.current_plan.completed_steps}/{self.current_plan.total_steps}\n"
+                        f"立即执行：{next_step.description}\n"
+                        f"请只输出工具调用 JSON：\n"
+                        f'{{"tool_call": {{"name": "工具名", "arguments": {{"参数": "值"}}}}}}'
                     )
                     self.short_term.add_assistant(hint)
                     logger.warning(
@@ -646,23 +647,40 @@ class Agent:
         # 系统提示词
         system_parts = [self.config.system_prompt]
 
-        # 注入工具描述
-        system_parts.append("\n" + self.tool_registry.describe_for_prompt())
-        system_parts.append(
-            "\n重要：当你需要调用工具时，请使用以下 JSON 格式：\n"
-            '{"tool_call": {"name": "工具名", "arguments": {"参数": "值"}}}\n'
-            "如果不需要调用工具，直接回复用户即可。"
-        )
-
-        # 注入计划信息
+        # 注入计划信息（放在工具描述之前，优先级更高）
         if self.current_plan:
             plan_text = self.current_plan.format_for_prompt()
-            system_parts.append(f"\n当前任务计划：\n{plan_text}")
+            system_parts.append(f"\n## 当前任务计划\n{plan_text}")
             next_step = self.current_plan.get_next_step()
             if next_step:
                 system_parts.append(
-                    f"\n当前步骤：执行 Step {next_step.id}: {next_step.description}"
+                    f"\n**⚠️ 你正在执行计划，现在必须完成 Step {next_step.id}: "
+                    f"{next_step.description}**"
                 )
+            system_parts.append(
+                "\n**你必须通过调用工具来完成计划中的每一步。不要跳过步骤，不要直接回复文本。**"
+            )
+            system_parts.append(
+                "\n请**只输出**工具调用 JSON，不要附带任何解释文字。"
+            )
+
+        # 注入工具描述
+        system_parts.append("\n## 可用工具\n" + self.tool_registry.describe_for_prompt())
+
+        # 工具调用格式（根据是否有计划使用不同措辞）
+        if self.current_plan:
+            system_parts.append(
+                "\n## 工具调用格式\n"
+                "请使用以下 JSON 格式调用工具（仅输出 JSON，不要附带文本）：\n"
+                '{"tool_call": {"name": "工具名", "arguments": {"参数": "值"}}}'
+            )
+        else:
+            system_parts.append(
+                "\n## 工具调用格式\n"
+                "当你需要调用工具时，请使用以下 JSON 格式：\n"
+                '{"tool_call": {"name": "工具名", "arguments": {"参数": "值"}}}\n'
+                "如果不需要调用工具，直接回复用户即可。"
+            )
 
         messages.append({
             "role": "system",
