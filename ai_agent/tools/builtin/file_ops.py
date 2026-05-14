@@ -21,8 +21,11 @@ from ai_agent.utils.security import check_path
         {"name": "end_line", "type": "number", "description": "结束行号（含）", "required": False},
     ],
 )
-def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+def read_file(path: str = ".", start_line: int | None = None, end_line: int | None = None) -> str:
     """读取文件内容（路径受沙箱限制）"""
+    if not path:
+        return "错误：未指定文件路径"
+
     try:
         safe_path = check_path(path, must_exist=True, for_write=False)
     except PermissionError as e:
@@ -58,8 +61,13 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
         {"name": "mode", "type": "string", "description": "写入模式: 'w'=覆盖, 'a'=追加", "required": False},
     ],
 )
-def write_file(path: str, content: str, mode: str = "w") -> str:
+def write_file(path: str = ".", content: str = "", mode: str = "w") -> str:
     """写入文件（路径受沙箱限制）"""
+    if not path:
+        return "错误：未指定文件路径"
+    if content is None:
+        content = ""
+
     try:
         safe_path = check_path(path, must_exist=False, for_write=True)
     except PermissionError as e:
@@ -82,8 +90,14 @@ def write_file(path: str, content: str, mode: str = "w") -> str:
         {"name": "pattern", "type": "string", "description": "glob 匹配模式，如 '*.py'", "required": False},
     ],
 )
-def list_directory(path: str, pattern: str = "*") -> str:
+def list_directory(path: str = ".", pattern: str = "*") -> str:
     """列出目录内容（路径受沙箱限制）"""
+    # 容错：LLM 可能传递 None
+    if not path:
+        path = "."
+    if not pattern:
+        pattern = "*"
+
     try:
         safe_path = check_path(path, must_exist=True, for_write=False)
     except PermissionError as e:
@@ -128,8 +142,11 @@ def list_directory(path: str, pattern: str = "*") -> str:
         {"name": "path", "type": "string", "description": "要删除的文件路径", "required": True},
     ],
 )
-def delete_file(path: str) -> str:
+def delete_file(path: str = ".") -> str:
     """删除文件（路径受沙箱限制）"""
+    if not path:
+        return "错误：未指定文件路径"
+
     try:
         safe_path = check_path(path, must_exist=True, for_write=True)
     except PermissionError as e:
