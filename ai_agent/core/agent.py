@@ -20,6 +20,7 @@ from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, StepStatus
 from ai_agent.llm.base import BaseLLM, LLMResponse
 from ai_agent.tools.registry import ToolRegistry
+from ai_agent.utils.token_utils import estimate_message_tokens, estimate_messages_tokens, truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -380,8 +381,9 @@ class Agent:
                         "result": result,
                     })
 
-                    # 记录到记忆
-                    self.short_term.add_tool_result(tool_name, result)
+                    # 记录到记忆（截断过长结果）
+                    truncated_result = truncate_text(result, self.config.max_tool_result_chars)
+                    self.short_term.add_tool_result(tool_name, truncated_result)
 
                     # 更新计划步骤
                     if self.current_plan:
@@ -479,7 +481,7 @@ class Agent:
     # ----------------------------------------------------------
 
     def _build_messages(self) -> list[dict]:
-        """构建发送给 LLM 的消息列表"""
+        """构建发送给 LLM 的消息列表（含上下文窗口裁剪）"""
         messages = []
 
         # 系统提示词
@@ -517,7 +519,107 @@ class Agent:
             f"system_prompt 长度={len(messages[0]['content'])}, "
             f"plan={'有' if self.current_plan else '无'}"
         )
+
+        # 上下文窗口裁剪
+        if self.config.max_context_tokens:
+            messages = self._trim_messages(messages)
+
         return messages
+
+    def _trim_messages(self, messages: list[dict]) -> list[dict]:
+        """
+        裁剪消息列表以适应上下文窗口。
+
+        策略：
+        1. 始终保留 system prompt（第一条消息）
+        2. 截断过长的工具结果
+        3. 如果仍超出预算，从旧到新移除消息，但保留第一条用户消息
+        4. 日志记录裁剪操作
+        """
+        budget = self.config.max_context_tokens
+        total = estimate_messages_tokens(messages)
+
+        if total <= budget:
+            return messages
+
+        logger.warning(f"⚠️ 上下文超出预算 ({total}/{budget} tokens)，开始裁剪...")
+        original_count = len(messages)
+
+        # 预留给 LLM 响应的空间（保守估计 30%）
+        effective_budget = int(budget * 0.7)
+
+        system_msg = messages[0]
+        body = messages[1:]
+
+        if not body:
+            logger.warning("仅剩系统消息，无法进一步裁剪")
+            return messages
+
+        # Step 1: 截断过长的工具结果
+        max_tool_chars = self.config.max_tool_result_chars
+        truncated_count = 0
+        for i, msg in enumerate(body):
+            if msg.get("role") == "tool" and len(msg.get("content", "")) > max_tool_chars:
+                body[i] = {
+                    "role": "tool",
+                    "content": truncate_text(msg["content"], max_tool_chars),
+                }
+                truncated_count += 1
+
+        if truncated_count:
+            total = estimate_messages_tokens([system_msg] + body)
+            if total <= effective_budget:
+                logger.info(
+                    f"截断 {truncated_count} 条工具结果后 tokens: {total}/{effective_budget}，"
+                    f"消息数: {len(body) + 1}"
+                )
+                return [system_msg] + body
+
+        # Step 2: 从旧到新裁剪消息（保留第一条用户消息）
+        # 找到第一条用户消息的位置
+        first_user_idx = None
+        for i, msg in enumerate(body):
+            if msg.get("role") == "user":
+                first_user_idx = i
+                break
+
+        # 从最新的消息开始，向前收集直到预算允许
+        kept_body = []
+        current_tokens = estimate_message_tokens(system_msg)
+
+        # 始终保留第一条用户消息（如果存在）
+        first_user_msg = None
+        if first_user_idx is not None:
+            first_user_msg = body[first_user_idx]
+            current_tokens += estimate_message_tokens(first_user_msg)
+
+        # 从后往前收集消息
+        for i in range(len(body) - 1, -1, -1):
+            # 跳过第一条用户消息（已经计入）
+            if first_user_idx is not None and i == first_user_idx:
+                continue
+
+            msg_tokens = estimate_message_tokens(body[i])
+            if current_tokens + msg_tokens <= effective_budget:
+                kept_body.insert(0, body[i])
+                current_tokens += msg_tokens
+            else:
+                break
+
+        # 在开头插入第一条用户消息
+        if first_user_msg is not None:
+            kept_body.insert(0, first_user_msg)
+
+        final_messages = [system_msg] + kept_body
+        final_total = estimate_messages_tokens(final_messages)
+
+        removed = original_count - len(final_messages)
+        logger.warning(
+            f"上下文裁剪完成: {original_count} → {len(final_messages)} 条消息 "
+            f"({total} → {final_total} tokens), 移除了 {removed} 条早期消息"
+        )
+
+        return final_messages
 
     def _build_summary_prompt(self) -> list[dict]:
         """构建总结提示"""
@@ -563,6 +665,10 @@ class Agent:
         if self.on_token:
             return self._call_llm_stream(messages)
 
+        # 安全检查：裁剪过长消息
+        if self.config.max_context_tokens:
+            messages = self._trim_messages(messages)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -588,6 +694,10 @@ class Agent:
 
     def _call_llm_stream(self, messages: list[dict]) -> LLMResponse:
         """流式调用 LLM，逐 token 推送"""
+        # 安全检查：裁剪过长消息
+        if self.config.max_context_tokens:
+            messages = self._trim_messages(messages)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:

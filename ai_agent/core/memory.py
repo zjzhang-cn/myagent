@@ -85,6 +85,11 @@ class ShortTermMemory:
         """生成记忆摘要"""
         return f"短期记忆: {len(self._messages)} 条消息, 窗口大小: {self.max_size}"
 
+    def estimate_tokens(self) -> int:
+        """估算当前所有消息的总 token 数（不含 system prompt）"""
+        from ai_agent.utils.token_utils import estimate_message_tokens
+        return sum(estimate_message_tokens(msg.to_dict()) for msg in self._messages)
+
     def __len__(self) -> int:
         return len(self._messages)
 

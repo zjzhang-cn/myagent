@@ -26,6 +26,10 @@ class AgentConfig:
     enable_planning: bool = True      # 是否启用规划模块
     plan_threshold_complexity: int = 3  # 复杂度 >= 此值时启动规划
 
+    # 上下文窗口管理
+    max_context_tokens: int = 8192   # 最大上下文 token 数，超出自动裁剪
+    max_tool_result_chars: int = 3000  # 单条工具结果最大字符数，超出截断
+
     # 记忆配置
     short_term_memory_size: int = 20  # 最近 N 轮对话
     long_term_memory_path: str = "~/.ai_agent/long_term_memory.json"
