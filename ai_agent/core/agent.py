@@ -350,13 +350,19 @@ class Agent:
                 self.state = AgentState.ACTING
                 limited_calls = tool_calls[:self.config.max_tool_calls_per_iteration]
 
-                # 收集有效的工具调用信息
+                # 收集有效的工具调用信息（含 id，OpenAI 兼容）
                 tool_infos: list[dict] = []
                 for tc in limited_calls:
                     t_name = tc.get("name", "")
                     t_args = tc.get("arguments", {})
                     if t_name:
-                        tool_infos.append({"name": t_name, "arguments": t_args})
+                        # 确保每个工具调用有唯一 id（OpenAI API 要求）
+                        tc_id = tc.get("id", "") or f"call_{t_name}_{iteration}"
+                        tool_infos.append({
+                            "name": t_name,
+                            "arguments": t_args,
+                            "id": tc_id,
+                        })
 
                 if tool_infos:
                     self._no_toolcall_streak = 0  # 重置连续无工具调用计数
@@ -369,19 +375,15 @@ class Agent:
                     # OpenAI API 要求 assistant 消息中必须包含 tool_calls 数组，
                     # 且后续 tool 消息的 tool_call_id 必须与之一致
                     openai_tool_calls = []
-                    for tc in limited_calls:
-                        tc_id = tc.get("id", "") or f"call_{tc.get('name', 'tool')}_{iteration}"
-                        tc_args = tc.get("arguments", {})
+                    for ti in tool_infos:
                         openai_tool_calls.append({
-                            "id": tc_id,
+                            "id": ti["id"],
                             "type": "function",
                             "function": {
-                                "name": tc.get("name", ""),
-                                "arguments": json.dumps(tc_args, ensure_ascii=False),
+                                "name": ti["name"],
+                                "arguments": json.dumps(ti["arguments"], ensure_ascii=False),
                             },
                         })
-                        # 把 id 回写到 tool_infos 中，方便后续 add_tool_result 使用
-                        tc["id"] = tc_id
                     self.short_term.add_assistant(
                         response.content or "", tool_calls=openai_tool_calls
                     )
