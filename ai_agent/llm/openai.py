@@ -115,6 +115,7 @@ class OpenAILLM(BaseLLM):
 
         self._log_request(messages, tools)
 
+        resp = None
         try:
             resp = requests.post(
                 url,
@@ -129,10 +130,9 @@ class OpenAILLM(BaseLLM):
             self._log_response(result)
             return result
         except requests.RequestException as e:
-            logger.error(f"OpenAI API 请求失败: {e}")
-            self._log_api_error(resp if 'resp' in dir() and resp is not None else None, e)
+            err_detail = self._log_api_error(resp, e, payload=payload)
             return LLMResponse(
-                content=f"调用 LLM 失败: {e}",
+                content=f"调用 LLM 失败: {e}\n\n{err_detail}",
                 tool_calls=[],
             )
 
@@ -161,6 +161,7 @@ class OpenAILLM(BaseLLM):
         usage = {}
         finish_reason = "stop"
 
+        resp = None
         try:
             with requests.post(
                 url,
@@ -224,10 +225,10 @@ class OpenAILLM(BaseLLM):
                             entry["arguments_str"] += func["arguments"]
 
         except requests.RequestException as e:
-            logger.error(f"OpenAI 流式请求失败: {e}")
+            err_detail = self._log_api_error(resp, e, payload=payload)
             yield StreamEvent(
                 type="done",
-                content=f"调用 LLM 失败: {e}",
+                content=f"调用 LLM 失败: {e}\n\n{err_detail}",
             )
             return
 
@@ -464,14 +465,72 @@ class OpenAILLM(BaseLLM):
         self,
         resp: requests.Response | None,
         error: Exception,
-    ) -> None:
-        """记录 API 错误详情"""
+        payload: dict | None = None,
+    ) -> str:
+        """记录 API 错误详情，返回详细的错误描述字符串"""
+        lines = []
+        lines.append(f"状态码: {resp.status_code if resp is not None else 'N/A'}")
+        lines.append(f"异常: {error}")
+
+        # 请求信息
+        if payload:
+            lines.append(f"\n{'─' * 40}")
+            lines.append("📤 请求详情:")
+            lines.append(f"  URL: {self.base_url}/v1/chat/completions")
+            lines.append(f"  Model: {self._model}")
+            lines.append(f"  Temperature: {self.temperature}")
+            lines.append(f"  Max tokens: {self.max_tokens}")
+            lines.append(f"  Stream: {payload.get('stream', False)}")
+            lines.append(f"  Messages count: {len(payload.get('messages', []))}")
+
+            # 打印消息摘要（每条消息前200字符）
+            messages = payload.get("messages", [])
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")[:200]
+                extra = ""
+                if msg.get("tool_calls"):
+                    tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
+                    extra = f", tool_calls={tc_names}"
+                if msg.get("tool_call_id"):
+                    extra = f", tool_call_id={msg['tool_call_id']}"
+                lines.append(f"  [{i}] role={role}{extra}: {content[:200]}")
+
+            tools = payload.get("tools", [])
+            if tools:
+                tool_names = [t.get("function", {}).get("name", "?") for t in tools]
+                lines.append(f"  Tools: {tool_names}")
+
+        # 响应信息
         if resp is not None:
+            lines.append(f"\n{'─' * 40}")
+            lines.append("📥 响应详情:")
             try:
-                body = resp.text[:500]
+                body = resp.text[:2000]
             except Exception:
                 body = "(无法读取响应体)"
-            logger.debug(f"API 错误响应 ({resp.status_code}): {body}")
+            lines.append(f"  Status: {resp.status_code}")
+            lines.append(f"  Body: {body}")
+
+        detail = "\n".join(lines)
+        logger.error(detail)
+
+        # 保存错误日志到 JSONL（供离线排查）
+        if self.response_log_path and payload:
+            error_entry = {
+                "type": "error",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "model": self._model,
+                "provider": "openai",
+                "base_url": self.base_url,
+                "error": str(error),
+                "status_code": resp.status_code if resp is not None else None,
+                "response_body": resp.text[:3000] if resp is not None and hasattr(resp, 'text') else None,
+                "request_payload": payload,
+            }
+            self._write_jsonl(error_entry)
+
+        return detail
 
     def _save_raw_request(self, messages: list[dict], tools: list[dict] | None) -> None:
         """保存原始 LLM 请求到 JSONL 文件"""
