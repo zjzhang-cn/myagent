@@ -32,8 +32,13 @@ class Message:
     metadata: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """转为 LLM API 格式"""
-        return {"role": self.role, "content": self.content}
+        """转为 LLM API 格式，包含 tool_calls 和 tool_call_id（OpenAI 兼容）"""
+        d: dict = {"role": self.role, "content": self.content}
+        if self.role == "assistant" and self.metadata.get("tool_calls"):
+            d["tool_calls"] = self.metadata["tool_calls"]
+        if self.role == "tool" and self.metadata.get("tool_call_id"):
+            d["tool_call_id"] = self.metadata["tool_call_id"]
+        return d
 
 
 class ShortTermMemory:
@@ -55,11 +60,13 @@ class ShortTermMemory:
     def add_user(self, content: str) -> None:
         self.add("user", content)
 
-    def add_assistant(self, content: str) -> None:
-        self.add("assistant", content)
+    def add_assistant(self, content: str, tool_calls: list[dict] | None = None) -> None:
+        """添加 assistant 消息，可附带 tool_calls"""
+        self.add("assistant", content, tool_calls=tool_calls or [])
 
-    def add_tool_result(self, tool_name: str, result: str) -> None:
-        self.add("tool", result, tool_name=tool_name)
+    def add_tool_result(self, tool_name: str, result: str, tool_call_id: str = "") -> None:
+        """添加工具执行结果消息（OpenAI 兼容：带 tool_call_id）"""
+        self.add("tool", result, tool_name=tool_name, tool_call_id=tool_call_id)
 
     def get_recent(self, n: int | None = None) -> list[Message]:
         """获取最近的 n 条消息"""

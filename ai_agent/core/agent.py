@@ -365,6 +365,27 @@ class Agent:
                         for ti in tool_infos
                     )
 
+                    # 将 LLM 的 assistant 消息（含 tool_calls）加入对话历史
+                    # OpenAI API 要求 assistant 消息中必须包含 tool_calls 数组，
+                    # 且后续 tool 消息的 tool_call_id 必须与之一致
+                    openai_tool_calls = []
+                    for tc in limited_calls:
+                        tc_id = tc.get("id", "") or f"call_{tc.get('name', 'tool')}_{iteration}"
+                        tc_args = tc.get("arguments", {})
+                        openai_tool_calls.append({
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": json.dumps(tc_args, ensure_ascii=False),
+                            },
+                        })
+                        # 把 id 回写到 tool_infos 中，方便后续 add_tool_result 使用
+                        tc["id"] = tc_id
+                    self.short_term.add_assistant(
+                        response.content or "", tool_calls=openai_tool_calls
+                    )
+
                     # --- 回调：行动（所有工具） ---
                     for ti in tool_infos:
                         logger.info(f"  Act -> {ti['name']}")
@@ -422,7 +443,8 @@ class Agent:
                         truncated_result = truncate_text(
                             result, self.config.max_tool_result_chars
                         )
-                        self.short_term.add_tool_result(t_name, truncated_result)
+                        tc_id = ti.get("id", "")
+                        self.short_term.add_tool_result(t_name, truncated_result, tool_call_id=tc_id)
 
                         # 更新计划步骤（检测失败）
                         if self.current_plan:
@@ -456,9 +478,9 @@ class Agent:
 
                     step.observation = " | ".join(combined_obs)
 
-                # 将工具结果反馈给 LLM
-                observation_text = "\n\n".join(observation_parts)
-                self.short_term.add_assistant(f"[工具执行结果]\n{observation_text}")
+                # 工具结果已通过 add_tool_result 逐个加入短期记忆
+                # OpenAI API 要求 tool 角色消息跟在 assistant(tool_calls) 消息之后
+                # 不再额外添加 assistant 格式的工具结果摘要
 
             else:
                 # 没有工具调用 — 检查是否应该继续执行计划
