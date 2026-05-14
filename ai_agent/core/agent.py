@@ -21,6 +21,7 @@ from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, StepStatus
 from ai_agent.llm.base import BaseLLM, LLMResponse
 from ai_agent.tools.registry import ToolRegistry
+from ai_agent.utils.security import SecurityContext, set_security_context, clear_security_context
 from ai_agent.utils.token_utils import estimate_message_tokens, estimate_messages_tokens, truncate_text
 
 logger = logging.getLogger(__name__)
@@ -878,16 +879,31 @@ class Agent:
     # 工具执行方法
     # ----------------------------------------------------------
 
+    def _build_security_context(self) -> SecurityContext:
+        """根据当前配置构建安全上下文"""
+        from ai_agent.utils.security import get_allowed_directories
+        return SecurityContext(
+            allowed_directories=get_allowed_directories(
+                self.config.workspace_directories
+            ),
+            allowed_commands=self.config.shell_allowed_commands,
+            allow_all_commands=self.config.shell_allow_all_commands,
+            enabled=True,
+        )
+
     def _execute_tools_sequential(self, tool_infos: list[dict]) -> list[str]:
         """顺序执行工具，返回结果列表（顺序与输入一致）"""
+        ctx = self._build_security_context()
         results = []
         for ti in tool_infos:
+            set_security_context(ctx)
             try:
                 result = self.tool_registry.execute(ti["name"], ti["arguments"])
             except Exception as e:
                 result = f"工具执行异常: {e}"
                 logger.error(f"工具 {ti['name']} 执行失败: {e}")
             results.append(result)
+        clear_security_context()
         return results
 
     def _execute_tools_parallel(self, tool_infos: list[dict]) -> list[str]:
@@ -896,11 +912,13 @@ class Agent:
         使用 ThreadPoolExecutor 并发执行，每个工具在独立线程中运行。
         单个工具失败不影响其他工具的执行。
         """
+        ctx = self._build_security_context()
         max_workers = min(len(tool_infos), self.config.max_parallel_tools)
         results: dict[int, str] = {}  # index -> result
 
         def _run_one(index: int, ti: dict) -> tuple[int, str]:
             """在独立线程中执行单个工具"""
+            set_security_context(ctx)
             name = ti["name"]
             args = ti["arguments"]
             try:

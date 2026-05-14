@@ -1,11 +1,15 @@
 """
 文件操作工具
+
+所有路径操作均通过安全模块的路径沙箱进行验证，
+确保 Agent 只能访问配置允许的目录。
 """
 
 import os
 import glob as glob_mod
 
 from ai_agent.tools.base import tool
+from ai_agent.utils.security import check_path
 
 
 @tool(
@@ -18,13 +22,16 @@ from ai_agent.tools.base import tool
     ],
 )
 def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-    """读取文件内容"""
-    expanded = os.path.expanduser(path)
-    if not os.path.exists(expanded):
-        return f"文件不存在: {expanded}"
+    """读取文件内容（路径受沙箱限制）"""
+    try:
+        safe_path = check_path(path, must_exist=True, for_write=False)
+    except PermissionError as e:
+        return f"权限拒绝: {e}"
+    except FileNotFoundError as e:
+        return f"文件不存在: {e}"
 
     try:
-        with open(expanded, "r", encoding="utf-8") as f:
+        with open(safe_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
         if start_line is not None:
@@ -52,13 +59,17 @@ def read_file(path: str, start_line: int | None = None, end_line: int | None = N
     ],
 )
 def write_file(path: str, content: str, mode: str = "w") -> str:
-    """写入文件"""
-    expanded = os.path.expanduser(path)
+    """写入文件（路径受沙箱限制）"""
     try:
-        os.makedirs(os.path.dirname(expanded) or ".", exist_ok=True)
-        with open(expanded, mode, encoding="utf-8") as f:
+        safe_path = check_path(path, must_exist=False, for_write=True)
+    except PermissionError as e:
+        return f"权限拒绝: {e}"
+
+    try:
+        os.makedirs(os.path.dirname(safe_path) or ".", exist_ok=True)
+        with open(safe_path, mode, encoding="utf-8") as f:
             f.write(content)
-        return f"成功写入文件: {expanded} ({len(content)} 字符)"
+        return f"成功写入文件: {safe_path} ({len(content)} 字符)"
     except Exception as e:
         return f"写入文件失败: {e}"
 
@@ -72,19 +83,23 @@ def write_file(path: str, content: str, mode: str = "w") -> str:
     ],
 )
 def list_directory(path: str, pattern: str = "*") -> str:
-    """列出目录内容"""
-    expanded = os.path.expanduser(path)
-    if not os.path.exists(expanded):
-        return f"目录不存在: {expanded}"
-    if not os.path.isdir(expanded):
-        return f"不是目录: {expanded}"
+    """列出目录内容（路径受沙箱限制）"""
+    try:
+        safe_path = check_path(path, must_exist=True, for_write=False)
+    except PermissionError as e:
+        return f"权限拒绝: {e}"
+    except FileNotFoundError as e:
+        return f"目录不存在: {e}"
+
+    if not os.path.isdir(safe_path):
+        return f"不是目录: {safe_path}"
 
     try:
-        search_pattern = os.path.join(expanded, pattern)
+        search_pattern = os.path.join(safe_path, pattern)
         items = glob_mod.glob(search_pattern)
 
         if not items:
-            return f"目录 '{expanded}' 中没有匹配 '{pattern}' 的文件"
+            return f"目录 '{safe_path}' 中没有匹配 '{pattern}' 的文件"
 
         result_lines = []
         for item in sorted(items):
@@ -101,7 +116,7 @@ def list_directory(path: str, pattern: str = "*") -> str:
                     size = f"{s / (1024 * 1024):.1f}MB"
             result_lines.append(f"[{item_type}] {name} {size}".strip())
 
-        return f"目录 '{expanded}' (共 {len(items)} 项):\n" + "\n".join(result_lines[:200])
+        return f"目录 '{safe_path}' (共 {len(items)} 项):\n" + "\n".join(result_lines[:200])
     except Exception as e:
         return f"列出目录失败: {e}"
 
@@ -114,17 +129,20 @@ def list_directory(path: str, pattern: str = "*") -> str:
     ],
 )
 def delete_file(path: str) -> str:
-    """删除文件"""
-    expanded = os.path.expanduser(path)
-    if not os.path.exists(expanded):
-        return f"文件不存在: {expanded}"
+    """删除文件（路径受沙箱限制）"""
+    try:
+        safe_path = check_path(path, must_exist=True, for_write=True)
+    except PermissionError as e:
+        return f"权限拒绝: {e}"
+    except FileNotFoundError as e:
+        return f"文件不存在: {e}"
 
     try:
-        if os.path.isdir(expanded):
-            os.rmdir(expanded)
-            return f"成功删除空目录: {expanded}"
+        if os.path.isdir(safe_path):
+            os.rmdir(safe_path)
+            return f"成功删除空目录: {safe_path}"
         else:
-            os.remove(expanded)
-            return f"成功删除文件: {expanded}"
+            os.remove(safe_path)
+            return f"成功删除文件: {safe_path}"
     except OSError as e:
         return f"删除失败: {e}"

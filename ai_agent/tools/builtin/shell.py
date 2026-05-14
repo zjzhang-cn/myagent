@@ -1,16 +1,15 @@
 """
 Shell 命令执行工具
+
+通过安全模块的命令白名单和路径沙箱进行双重验证，
+确保 Agent 只能执行允许的命令且在指定的目录范围内。
 """
 
+import os
 import subprocess
 
 from ai_agent.tools.base import tool
-
-# 危险命令黑名单
-_BLOCKED_COMMANDS = {
-    "rm -rf /", "mkfs.", "dd if=", ":(){ :|:& };:", "> /dev/sda",
-    "chmod -R 777 /", "mv /* /dev/null",
-}
+from ai_agent.utils.security import check_command, check_path
 
 
 @tool(
@@ -18,7 +17,7 @@ _BLOCKED_COMMANDS = {
     description="执行 Shell 命令并返回输出。仅限安全命令，危险操作会被拦截。",
     params=[
         {"name": "command", "type": "string", "description": "要执行的 Shell 命令", "required": True},
-        {"name": "working_dir", "type": "string", "description": "工作目录（可选）", "required": False},
+        {"name": "working_dir", "type": "string", "description": "工作目录（可选，受路径沙箱限制）", "required": False},
         {"name": "timeout", "type": "number", "description": "超时秒数，默认30", "required": False},
     ],
 )
@@ -27,16 +26,27 @@ def run_shell_command(
     working_dir: str | None = None,
     timeout: int = 30,
 ) -> str:
-    """安全地执行 Shell 命令"""
-    import os
+    """安全地执行 Shell 命令（命令白名单 + 路径沙箱）"""
+    # Step 1: 命令白名单检查
+    is_safe, msg = check_command(command)
+    if not is_safe:
+        return f"⚠️ 安全拦截：{msg}"
 
-    # 安全校验
-    cmd_lower = command.lower().replace(" ", "")
-    for blocked in _BLOCKED_COMMANDS:
-        blocked_compact = blocked.replace(" ", "")
-        if blocked_compact in cmd_lower:
-            return f"⚠️ 安全拦截：命令包含危险操作 ({blocked})，已被拒绝执行。"
+    # Step 2: 工作目录沙箱检查
+    cwd = None
+    if working_dir:
+        try:
+            safe_dir = check_path(working_dir, must_exist=True, for_write=False)
+            cwd = safe_dir
+        except PermissionError as e:
+            return f"权限拒绝：工作目录 {e}"
+        except FileNotFoundError as e:
+            return f"工作目录不存在: {e}"
+    else:
+        # 默认工作目录也在沙箱内
+        cwd = os.getcwd()
 
+    # Step 3: 执行命令
     try:
         result = subprocess.run(
             command,
@@ -44,7 +54,7 @@ def run_shell_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=os.path.expanduser(working_dir) if working_dir else None,
+            cwd=cwd,
             executable="/bin/bash",
         )
 
@@ -63,6 +73,8 @@ def run_shell_command(
             output = output[:4000] + f"\n...(截断，共 {len(output)} 字符)"
 
         prefix = f"命令: {command}\n"
+        if msg:  # 警告信息
+            prefix += f"{msg}\n"
         if result.returncode != 0:
             prefix += f"退出码: {result.returncode}\n"
         return prefix + output

@@ -40,6 +40,23 @@ class AgentConfig:
     # 工具配置
     tools_dir: Optional[str] = None   # 自定义工具目录
 
+    # 安全配置
+    workspace_directories: list[str] = field(default_factory=lambda: ["."])
+    """文件操作允许的目录列表（默认仅当前目录）。添加更多: ['.', '~/projects']"""
+    shell_allowed_commands: set[str] = field(default_factory=lambda: {
+        "ls", "cat", "echo", "pwd", "find", "grep", "head", "tail",
+        "wc", "sort", "uniq", "cut", "tr", "date", "whoami", "which",
+        "uname", "uptime", "df", "du", "env", "ps", "pgrep",
+        "mkdir", "cp", "mv", "touch", "rm", "chmod",
+        "tar", "gzip", "gunzip", "zip", "unzip",
+        "python", "python3", "pip", "pip3",
+        "git", "node", "npm", "npx", "make",
+        "awk", "sed", "xargs",
+        "curl", "wget",
+    })
+    shell_allow_all_commands: bool = False
+    """设为 True 允许所有 Shell 命令（不推荐，有安全风险）"""
+
     # 系统提示词
     system_prompt: str = field(default_factory=lambda: (
         "你是一个智能 AI Agent，能够通过工具调用和规划来完成复杂任务。\n"
