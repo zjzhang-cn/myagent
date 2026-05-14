@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -343,66 +344,101 @@ class Agent:
             if tool_calls:
                 # 2c. 执行工具
                 self.state = AgentState.ACTING
-                observation_parts = []
+                limited_calls = tool_calls[:self.config.max_tool_calls_per_iteration]
 
-                for tc in tool_calls[:self.config.max_tool_calls_per_iteration]:
-                    tool_name = tc.get("name", "")
-                    tool_args = tc.get("arguments", {})
+                # 收集有效的工具调用信息
+                tool_infos: list[dict] = []
+                for tc in limited_calls:
+                    t_name = tc.get("name", "")
+                    t_args = tc.get("arguments", {})
+                    if t_name:
+                        tool_infos.append({"name": t_name, "arguments": t_args})
 
-                    if not tool_name:
-                        continue
-
-                    step.action = f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)})"
-                    logger.info(f"  Act -> {tool_name}")
-
-                    # --- 回调：行动 ---
-                    self._emit("acting", {
-                        "tool": tool_name,
-                        "arguments": tool_args,
-                    })
-
-                    # 执行工具
-                    result = self.tool_registry.execute(tool_name, tool_args)
-                    logger.debug(
-                        f"[工具执行] {tool_name}({json.dumps(tool_args, ensure_ascii=False)}) "
-                        f"-> {result[:300]!r}"
+                if tool_infos:
+                    step.action = "; ".join(
+                        f"{ti['name']}({json.dumps(ti['arguments'], ensure_ascii=False)})"
+                        for ti in tool_infos
                     )
 
-                    # 2d. 观察阶段
-                    self.state = AgentState.OBSERVING
-                    observation_parts.append(
-                        f"[工具: {tool_name}]\n输入: {json.dumps(tool_args, ensure_ascii=False)}\n输出: {result}"
+                    # --- 回调：行动（所有工具） ---
+                    for ti in tool_infos:
+                        logger.info(f"  Act -> {ti['name']}")
+                        self._emit("acting", {
+                            "tool": ti["name"],
+                            "arguments": ti["arguments"],
+                        })
+
+                    # 执行工具（并发或顺序）
+                    use_parallel = (
+                        self.config.parallel_tool_execution
+                        and len(tool_infos) > 1
                     )
-                    step.observation = result
+                    if use_parallel:
+                        logger.info(f"  ⚡ 并发执行 {len(tool_infos)} 个工具...")
+                        exec_start = time.time()
+                        results = self._execute_tools_parallel(tool_infos)
+                        exec_elapsed = time.time() - exec_start
+                        logger.info(
+                            f"  并发执行完成，耗时 {exec_elapsed:.2f}s "
+                            f"(工具数: {len(tool_infos)})"
+                        )
+                    else:
+                        results = self._execute_tools_sequential(tool_infos)
 
-                    # --- 回调：观察 ---
-                    self._emit("observing", {
-                        "tool": tool_name,
-                        "result": result,
-                    })
+                    # 处理每个工具的执行结果
+                    observation_parts = []
+                    combined_obs: list[str] = []
+                    for ti, result in zip(tool_infos, results):
+                        t_name = ti["name"]
+                        t_args = ti["arguments"]
 
-                    # 记录到记忆（截断过长结果）
-                    truncated_result = truncate_text(result, self.config.max_tool_result_chars)
-                    self.short_term.add_tool_result(tool_name, truncated_result)
+                        # 日志
+                        logger.debug(
+                            f"[工具执行] {t_name}({json.dumps(t_args, ensure_ascii=False)}) "
+                            f"-> {result[:300]!r}"
+                        )
 
-                    # 更新计划步骤
-                    if self.current_plan:
-                        next_step = self.current_plan.get_next_step()
-                        if next_step:
-                            matched = (
-                                tool_name == next_step.tool_hint or
-                                next_step.description.lower() in result.lower()
-                            )
-                            if matched or not next_step.tool_hint:
-                                self.current_plan.mark_step(
-                                    next_step.id, StepStatus.COMPLETED, result
+                        # 观察阶段
+                        self.state = AgentState.OBSERVING
+                        observation_parts.append(
+                            f"[工具: {t_name}]\n"
+                            f"输入: {json.dumps(t_args, ensure_ascii=False)}\n"
+                            f"输出: {result}"
+                        )
+                        combined_obs.append(f"{t_name}: {result[:200]}")
+
+                        # --- 回调：观察 ---
+                        self._emit("observing", {
+                            "tool": t_name,
+                            "result": result,
+                        })
+
+                        # 记录到记忆（截断过长结果）
+                        truncated_result = truncate_text(
+                            result, self.config.max_tool_result_chars
+                        )
+                        self.short_term.add_tool_result(t_name, truncated_result)
+
+                        # 更新计划步骤
+                        if self.current_plan:
+                            next_step = self.current_plan.get_next_step()
+                            if next_step:
+                                matched = (
+                                    t_name == next_step.tool_hint or
+                                    next_step.description.lower() in result.lower()
                                 )
+                                if matched or not next_step.tool_hint:
+                                    self.current_plan.mark_step(
+                                        next_step.id, StepStatus.COMPLETED, result
+                                    )
 
-                    # 工作记忆中记录
-                    self.working.set(f"_last_tool_{tool_name}", result)
-                    self.working.add_step_result(
-                        step_name=tool_name, result=result
-                    )
+                        # 工作记忆中记录
+                        self.working.set(f"_last_tool_{t_name}", result)
+                        self.working.add_step_result(
+                            step_name=t_name, result=result
+                        )
+
+                    step.observation = " | ".join(combined_obs)
 
                 # 将工具结果反馈给 LLM
                 observation_text = "\n\n".join(observation_parts)
@@ -769,3 +805,56 @@ class Agent:
                     )
         except Exception as e:
             logger.debug(f"保存长期记忆失败: {e}")
+
+    # ----------------------------------------------------------
+    # 工具执行方法
+    # ----------------------------------------------------------
+
+    def _execute_tools_sequential(self, tool_infos: list[dict]) -> list[str]:
+        """顺序执行工具，返回结果列表（顺序与输入一致）"""
+        results = []
+        for ti in tool_infos:
+            try:
+                result = self.tool_registry.execute(ti["name"], ti["arguments"])
+            except Exception as e:
+                result = f"工具执行异常: {e}"
+                logger.error(f"工具 {ti['name']} 执行失败: {e}")
+            results.append(result)
+        return results
+
+    def _execute_tools_parallel(self, tool_infos: list[dict]) -> list[str]:
+        """并发执行多个工具调用，返回结果列表（顺序与输入一致）
+
+        使用 ThreadPoolExecutor 并发执行，每个工具在独立线程中运行。
+        单个工具失败不影响其他工具的执行。
+        """
+        max_workers = min(len(tool_infos), self.config.max_parallel_tools)
+        results: dict[int, str] = {}  # index -> result
+
+        def _run_one(index: int, ti: dict) -> tuple[int, str]:
+            """在独立线程中执行单个工具"""
+            name = ti["name"]
+            args = ti["arguments"]
+            try:
+                result = self.tool_registry.execute(name, args)
+                return index, result
+            except Exception as e:
+                logger.error(f"工具 {name} 执行失败: {e}")
+                return index, f"工具执行异常: {e}"
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_run_one, i, ti): i
+                for i, ti in enumerate(tool_infos)
+            }
+            for future in as_completed(futures):
+                try:
+                    idx, result = future.result()
+                    results[idx] = result
+                except Exception as e:
+                    idx = futures[future]
+                    logger.error(f"工具 {tool_infos[idx]['name']} 线程异常: {e}")
+                    results[idx] = f"工具执行异常: {e}"
+
+        # 按原始顺序返回
+        return [results.get(i, "执行结果缺失") for i in range(len(tool_infos))]

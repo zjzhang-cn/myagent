@@ -20,6 +20,8 @@ class AgentConfig:
     # Agent 行为
     max_iterations: int = 15          # ReAct 循环最大轮次
     max_tool_calls_per_iteration: int = 3
+    max_parallel_tools: int = 5       # 并发工具执行的最大线程数
+    parallel_tool_execution: bool = True  # 是否启用并发工具执行
     verbose: bool = True              # 打印详细日志
 
     # 规划配置
