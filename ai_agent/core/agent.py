@@ -255,6 +255,7 @@ class Agent:
 
         self.state = AgentState.IDLE
         self.current_plan: Plan | None = None
+        self._replan_count: int = 0  # 当前任务中已重新规划次数
         self.on_step = on_step
         self.on_token = on_token
         self.on_thinking = on_thinking
@@ -277,6 +278,7 @@ class Agent:
         steps: list[AgentStep] = []
 
         # Step 0: 将用户输入加入短期记忆
+        self._replan_count = 0  # 重置重新规划计数
         self.short_term.add_user(user_input)
         self.state = AgentState.IDLE
 
@@ -419,7 +421,7 @@ class Agent:
                         )
                         self.short_term.add_tool_result(t_name, truncated_result)
 
-                        # 更新计划步骤
+                        # 更新计划步骤（检测失败）
                         if self.current_plan:
                             next_step = self.current_plan.get_next_step()
                             if next_step:
@@ -428,9 +430,20 @@ class Agent:
                                     next_step.description.lower() in result.lower()
                                 )
                                 if matched or not next_step.tool_hint:
-                                    self.current_plan.mark_step(
-                                        next_step.id, StepStatus.COMPLETED, result
-                                    )
+                                    is_error = self._is_error_result(result)
+                                    if is_error:
+                                        error_cat = self._categorize_error(result)
+                                        logger.warning(
+                                            f"步骤 {next_step.id} 执行失败 "
+                                            f"({error_cat}): {result[:100]}"
+                                        )
+                                        self.current_plan.mark_step(
+                                            next_step.id, StepStatus.FAILED, result
+                                        )
+                                    else:
+                                        self.current_plan.mark_step(
+                                            next_step.id, StepStatus.COMPLETED, result
+                                        )
 
                         # 工作记忆中记录
                         self.working.set(f"_last_tool_{t_name}", result)
@@ -453,16 +466,71 @@ class Agent:
                 self._emit("done", {"answer": final_answer})
                 break
 
+            # 检查是否需要重新规划（有失败步骤且未达到次数上限）
+            if (self.current_plan and
+                self.current_plan.failed_steps > 0 and
+                self._replan_count < self.config.max_replan_attempts):
+
+                failed_info = self._collect_failed_steps_info()
+                logger.warning(
+                    f"检测到 {self.current_plan.failed_steps} 个失败步骤，"
+                    f"尝试重新规划 (第 {self._replan_count + 1}/{self.config.max_replan_attempts} 次)"
+                )
+
+                try:
+                    new_plan = self.planner.replan(
+                        self.current_plan, failed_info
+                    )
+                    # 保留已完成步骤的状态
+                    for old_step in self.current_plan.steps:
+                        if old_step.status == StepStatus.COMPLETED:
+                            # 在新计划中标记对应步骤为已完成
+                            for new_step in new_plan.steps:
+                                if (old_step.description[:30] in new_step.description or
+                                    new_step.description[:30] in old_step.description):
+                                    new_step.status = StepStatus.COMPLETED
+                                    new_step.result = old_step.result
+
+                    self.current_plan = new_plan
+                    self._replan_count += 1
+                    self._emit("replanning", {
+                        "attempt": self._replan_count,
+                        "failed_count": failed_info.count("失败"),
+                        "new_total_steps": new_plan.total_steps,
+                    })
+                    logger.info(
+                        f"重新规划完成: {new_plan.total_steps} 个步骤 "
+                        f"(已完成: {new_plan.completed_steps}, 失败: {new_plan.failed_steps})"
+                    )
+
+                    # 将重新规划信息注入短期记忆，帮助 LLM 理解上下文变化
+                    replan_msg = (
+                        f"[系统通知] 检测到计划执行中有步骤失败，已自动重新规划。\n"
+                        f"新计划共 {new_plan.total_steps} 个步骤。\n"
+                        f"已完成: {new_plan.completed_steps}, 待执行: {new_plan.total_steps - new_plan.completed_steps}"
+                    )
+                    self.short_term.add_assistant(replan_msg)
+
+                except Exception as e:
+                    logger.error(f"重新规划失败: {e}，继续使用当前计划")
+
             # 检查计划是否全部完成
             if self.current_plan and self.current_plan.get_next_step() is None:
-                if self.current_plan.failed_steps == 0:
-                    self.state = AgentState.DONE
+                self.state = AgentState.DONE
+                if self.current_plan.failed_steps > 0:
+                    # 有失败步骤，生成包含失败信息的总结
                     summary_messages = self._build_summary_prompt()
-                    summary_response = self._call_llm(summary_messages)
-                    final_answer = summary_response.content
-                    self.short_term.add_assistant(final_answer)
-                    self._emit("done", {"answer": final_answer})
-                    break
+                    summary_messages[0]["content"] += (
+                        f"\n注意：有 {self.current_plan.failed_steps} 个步骤执行失败。"
+                        f"请在总结中说明哪些步骤已完成、哪些失败，并给出建议。"
+                    )
+                else:
+                    summary_messages = self._build_summary_prompt()
+                summary_response = self._call_llm(summary_messages)
+                final_answer = summary_response.content
+                self.short_term.add_assistant(final_answer)
+                self._emit("done", {"answer": final_answer})
+                break
 
         # 如果达到最大迭代次数还未结束
         if self.state != AgentState.DONE:
@@ -858,3 +926,69 @@ class Agent:
 
         # 按原始顺序返回
         return [results.get(i, "执行结果缺失") for i in range(len(tool_infos))]
+
+    # ----------------------------------------------------------
+    # 错误检测与恢复
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _is_error_result(result: str) -> bool:
+        """判断工具执行结果是否为错误"""
+        error_patterns = [
+            "错误：", "错误:",
+            "参数错误", "参数异常",
+            "工具执行异常",
+            "执行异常",
+            "权限不足", "Permission denied",
+            "未找到工具",
+            "命令不存在",
+            "文件不存在",
+            "操作不允许",
+        ]
+        return any(pattern in result for pattern in error_patterns)
+
+    @staticmethod
+    def _categorize_error(result: str) -> str:
+        """对错误进行分类，返回错误类别标签"""
+        if "未找到工具" in result:
+            return "tool_not_found"
+        if "超时" in result or "timeout" in result.lower():
+            return "timeout"
+        if "参数错误" in result or "参数异常" in result:
+            return "parameter_error"
+        if "权限" in result or "Permission" in result or "操作不允许" in result:
+            return "permission_error"
+        if "文件不存在" in result:
+            return "not_found"
+        if "命令不存在" in result:
+            return "command_not_found"
+        if "工具执行异常" in result or "执行异常" in result:
+            return "execution_error"
+        return "unknown_error"
+
+    def _collect_failed_steps_info(self) -> str:
+        """收集失败步骤的详细信息，用于重新规划"""
+        if not self.current_plan:
+            return "无失败步骤"
+
+        lines = ["以下步骤执行失败，需要调整计划："]
+        for step in self.current_plan.steps:
+            if step.status == StepStatus.FAILED:
+                error_cat = self._categorize_error(step.result)
+                lines.append(
+                    f"- Step {step.id}: {step.description}\n"
+                    f"  错误类型: {error_cat}\n"
+                    f"  错误详情: {step.result[:300]}"
+                )
+
+        # 也包含已完成步骤的简要信息
+        completed = [s for s in self.current_plan.steps
+                     if s.status == StepStatus.COMPLETED]
+        if completed:
+            lines.append("\n已完成的步骤：")
+            for step in completed:
+                lines.append(
+                    f"- Step {step.id}: {step.description} [已完成]"
+                )
+
+        return "\n".join(lines)

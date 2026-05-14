@@ -27,6 +27,7 @@ class AgentConfig:
     # 规划配置
     enable_planning: bool = True      # 是否启用规划模块
     plan_threshold_complexity: int = 3  # 复杂度 >= 此值时启动规划
+    max_replan_attempts: int = 2      # 执行失败时最多重新规划次数
 
     # 上下文窗口管理
     max_context_tokens: int = 8192   # 最大上下文 token 数，超出自动裁剪
