@@ -280,6 +280,7 @@ class Agent:
 
         # Step 0: 将用户输入加入短期记忆
         self._replan_count = 0  # 重置重新规划计数
+        self._no_toolcall_streak = 0  # 重置连续无工具调用计数
         self.short_term.add_user(user_input)
         self.state = AgentState.IDLE
 
@@ -358,6 +359,7 @@ class Agent:
                         tool_infos.append({"name": t_name, "arguments": t_args})
 
                 if tool_infos:
+                    self._no_toolcall_streak = 0  # 重置连续无工具调用计数
                     step.action = "; ".join(
                         f"{ti['name']}({json.dumps(ti['arguments'], ensure_ascii=False)})"
                         for ti in tool_infos
@@ -459,13 +461,48 @@ class Agent:
                 self.short_term.add_assistant(f"[工具执行结果]\n{observation_text}")
 
             else:
-                # 没有工具调用，视为最终答案
-                self.state = AgentState.DONE
-                final_answer = response.content
-                self.short_term.add_assistant(final_answer)
-                step.state = AgentState.DONE
-                self._emit("done", {"answer": final_answer})
-                break
+                # 没有工具调用 — 检查是否应该继续执行计划
+                if self.current_plan and self.current_plan.get_next_step() is not None:
+                    # 有计划但 LLM 未调用工具，提示它继续执行下一步
+                    next_step = self.current_plan.get_next_step()
+                    if not hasattr(self, '_no_toolcall_streak'):
+                        self._no_toolcall_streak = 0
+                    self._no_toolcall_streak += 1
+
+                    if self._no_toolcall_streak >= 3:
+                        # 连续多次未调用工具，强制结束
+                        logger.warning(
+                            f"LLM 连续 {self._no_toolcall_streak} 次未调用工具，"
+                            f"但计划仍有未完成步骤，强制结束"
+                        )
+                        self.state = AgentState.DONE
+                        final_answer = response.content or "任务未能完成，部分计划步骤未执行。"
+                        self.short_term.add_assistant(final_answer)
+                        step.state = AgentState.DONE
+                        self._emit("done", {"answer": final_answer})
+                        break
+
+                    hint = (
+                        f"[系统提示] 当前任务计划尚未完成，共 {self.current_plan.total_steps} 步，"
+                        f"已完成 {self.current_plan.completed_steps} 步。"
+                        f"下一步应执行：{next_step.description}。"
+                        f"请调用相应的工具继续执行，不要直接回复文本。"
+                    )
+                    self.short_term.add_assistant(hint)
+                    logger.warning(
+                        f"LLM 未调用工具但计划未完成 "
+                        f"({self.current_plan.completed_steps}/{self.current_plan.total_steps})，"
+                        f"注入提示: {next_step.description}"
+                    )
+                    continue  # 继续循环，不退出
+                else:
+                    # 无计划或计划已完成，视为最终答案
+                    self.state = AgentState.DONE
+                    final_answer = response.content
+                    self.short_term.add_assistant(final_answer)
+                    step.state = AgentState.DONE
+                    self._emit("done", {"answer": final_answer})
+                    break
 
             # 检查是否需要重新规划（有失败步骤且未达到次数上限）
             if (self.current_plan and
@@ -537,6 +574,23 @@ class Agent:
         if self.state != AgentState.DONE:
             final_answer = self._force_summary()
             self.state = AgentState.DONE
+
+        # 如果最终答案为空，尝试生成回退答案
+        if not final_answer or not final_answer.strip():
+            logger.warning("最终答案为空，尝试生成回退答案...")
+            try:
+                fallback = self._force_summary()
+                if fallback and fallback.strip():
+                    final_answer = fallback
+                else:
+                    final_answer = (
+                        "抱歉，我暂时无法完成你的请求。"
+                        "请尝试简化问题或重新表述后重试。"
+                    )
+            except Exception:
+                final_answer = (
+                    "抱歉，处理过程中遇到问题，请重新尝试。"
+                )
 
         elapsed = time.time() - start_time
 
