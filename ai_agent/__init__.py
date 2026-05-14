@@ -1,11 +1,11 @@
 """
-AI Agent - 基于 Ollama 的工具调用型智能 Agent
+AI Agent - 基于 Ollama / OpenAI 的工具调用型智能 Agent
 
 支持：
 - 工具调用 (Function Calling)
 - 任务规划与分解
 - 短期/工作/长期记忆系统
-- 本地 Ollama 模型
+- Ollama 本地模型 + OpenAI API 及兼容 API
 """
 
 from ai_agent.config import AgentConfig
@@ -13,10 +13,11 @@ from ai_agent.core.agent import Agent, AgentResult, AgentState
 from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, PlanStep, StepStatus
 from ai_agent.llm.ollama import OllamaLLM
+from ai_agent.llm.openai import OpenAILLM
 from ai_agent.tools.base import tool
 from ai_agent.tools.registry import ToolRegistry, get_registry
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "Agent",
@@ -31,6 +32,7 @@ __all__ = [
     "PlanStep",
     "StepStatus",
     "OllamaLLM",
+    "OpenAILLM",
     "tool",
     "ToolRegistry",
     "get_registry",

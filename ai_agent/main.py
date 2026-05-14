@@ -27,6 +27,7 @@ from pathlib import Path
 from ai_agent.config import AgentConfig
 from ai_agent.core.agent import Agent
 from ai_agent.llm.ollama import OllamaLLM
+from ai_agent.llm.openai import OpenAILLM
 from ai_agent.tools.builtin import (
     delete_file,
     fetch_url,
@@ -85,6 +86,9 @@ def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
 def create_agent(
     model: str = "minimax-m2.5:cloud",
     host: str = "http://localhost:11434",
+    provider: str = "ollama",
+    api_key: str | None = None,
+    openai_base_url: str | None = None,
     temperature: float = 0.7,
     verbose: bool = False,
     on_step: callable = None,
@@ -96,18 +100,31 @@ def create_agent(
     """创建并配置 Agent"""
     config = AgentConfig(
         model=model,
+        provider=provider,
         ollama_host=host,
+        api_key=api_key,
+        openai_base_url=openai_base_url,
         temperature=temperature,
         verbose=verbose,
     )
 
-    llm = OllamaLLM(
-        model=model,
-        host=host,
-        temperature=temperature,
-        response_log_path=response_log_path,
-        enable_thinking=enable_thinking,
-    )
+    if provider == "openai":
+        llm = OpenAILLM(
+            model=model,
+            api_key=api_key,
+            base_url=openai_base_url,
+            temperature=temperature,
+            response_log_path=response_log_path,
+            enable_thinking=enable_thinking,
+        )
+    else:
+        llm = OllamaLLM(
+            model=model,
+            host=host,
+            temperature=temperature,
+            response_log_path=response_log_path,
+            enable_thinking=enable_thinking,
+        )
 
     # 创建工具注册表并注册内置工具
     registry = ToolRegistry()
@@ -293,11 +310,16 @@ def interactive_mode(agent: Agent) -> None:
         print()
 
 
-def list_models(host: str = "http://localhost:11434") -> None:
+def list_models(host: str = "http://localhost:11434", provider: str = "ollama",
+                api_key: str | None = None, openai_base_url: str | None = None) -> None:
     """列出可用模型"""
-    llm = OllamaLLM(host=host)
+    if provider == "openai":
+        llm = OpenAILLM(api_key=api_key, base_url=openai_base_url)
+    else:
+        llm = OllamaLLM(host=host)
     models = llm.list_models()
-    print(f"\n可用模型 ({len(models)} 个):")
+    provider_label = f" ({provider})"
+    print(f"\n可用模型 ({len(models)} 个){provider_label}:")
     for m in models:
         print(f"  • {m}")
     print()
@@ -305,14 +327,16 @@ def list_models(host: str = "http://localhost:11434") -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AI Agent - 基于 Ollama 的工具调用型智能 Agent",
+        description="AI Agent - 基于 Ollama / OpenAI 的工具调用型智能 Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                                    # 交互模式
+  %(prog)s                                    # 交互模式 (Ollama)
+  %(prog)s --provider openai --model gpt-4o   # 使用 OpenAI
   %(prog)s "搜索今天的科技新闻"                  # 单次查询
   %(prog)s --model qwen2.5:14b "分析代码"       # 指定模型
   %(prog)s --list-models                       # 列出可用模型
+  %(prog)s --list-models --provider openai     # 列出 OpenAI 模型
         """,
     )
     parser.add_argument(
@@ -323,12 +347,29 @@ def main():
     parser.add_argument(
         "--model", "-m",
         default="minimax-m2.5:cloud",
-        help="Ollama 模型名 (默认: minimax-m2.5:cloud)",
+        help="模型名 (默认: minimax-m2.5:cloud)",
+    )
+    parser.add_argument(
+        "--provider", "-p",
+        default="ollama",
+        choices=["ollama", "openai"],
+        help="LLM 提供商 (默认: ollama, 可选: openai)",
     )
     parser.add_argument(
         "--host",
         default="http://localhost:11434",
         help="Ollama 服务地址 (默认: http://localhost:11434)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="OpenAI API 密钥（也可通过 OPENAI_API_KEY 环境变量设置）",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        default=None,
+        metavar="URL",
+        help="OpenAI API 基础地址（默认自动推断，也可通过 OPENAI_BASE_URL 环境变量设置）",
     )
     parser.add_argument(
         "--temperature", "-t",
@@ -383,7 +424,12 @@ def main():
         sys.stderr.write(f"📝 原始 LLM 响应: {response_log_path}\n")
 
     if args.list_models:
-        list_models(args.host)
+        list_models(
+            host=args.host,
+            provider=args.provider,
+            api_key=args.api_key,
+            openai_base_url=args.openai_base_url,
+        )
         return
 
     # 确定是否启用推理
@@ -395,6 +441,9 @@ def main():
     agent = create_agent(
         model=args.model,
         host=args.host,
+        provider=args.provider,
+        api_key=args.api_key,
+        openai_base_url=args.openai_base_url,
         temperature=args.temperature,
         verbose=args.verbose,
         on_step=_print_step,
