@@ -1,6 +1,6 @@
 # AI Agent
 
-基于 Ollama 本地模型的工具调用型智能 Agent，支持工具调用、任务规划与分解、三层记忆系统、流式输出与实时思考过程显示。
+基于 OpenAI API 的工具调用型智能 Agent，支持工具调用、任务规划与分解、三层记忆系统、流式输出与实时思考过程显示。
 
 ## 核心特性
 
@@ -40,8 +40,7 @@
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) 包管理器
-- [Ollama](https://ollama.com) 已安装并运行
-- 已拉取至少一个模型（如 `ollama pull qwen2.5:7b`）
+- OpenAI API Key 或兼容 API 的密钥（如 DeepSeek、Moonshot 等）
 
 ### 安装
 
@@ -52,18 +51,30 @@ uv sync
 
 ### 使用
 
+将 `.env.example` 复制为 `.env` 并填入 API 密钥，或通过环境变量设置：
+
+```bash
+# 方式一：使用 .env 文件（推荐）
+cp .env.example .env
+# 然后编辑 .env 填入 OPENAI_API_KEY
+
+# 方式二：通过环境变量
+export OPENAI_API_KEY="sk-xxx"
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+```
+
 **交互模式**（自动显示思考过程、流式输出）：
 
 ```bash
-uv run ai-agent --model qwen2.5:7b
+uv run ai-agent --model deepseek-v4-flash
 # 或
-uv run python -m ai_agent.main --model qwen2.5:7b
+uv run python -m ai_agent.main --model deepseek-v4-flash
 ```
 
 **启用模型推理显示**（需模型支持 think）：
 
 ```bash
-uv run python -m ai_agent.main --think --model qwen2.5:7b
+uv run python -m ai_agent.main --think --model deepseek-v4-flash
 ```
 
 **记录 LLM 交互日志**：
@@ -83,13 +94,22 @@ uv run python -m ai_agent.main --log-file agent.log "搜索新闻"
 **单次查询**：
 
 ```bash
-uv run python -m ai_agent.main --model qwen2.5:7b "搜索今天的科技新闻，保存到 news.txt"
+uv run python -m ai_agent.main --model deepseek-v4-flash "搜索今天的科技新闻，保存到 news.txt"
 ```
 
 **列出可用模型**：
 
 ```bash
 uv run python -m ai_agent.main --list-models
+```
+
+**使用 OpenAI 模型**：
+
+```bash
+# 通过环境变量设置 API Key 和 Base URL
+export OPENAI_API_KEY="sk-xxx"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+uv run python -m ai_agent.main --model gpt-4o "搜索今天的科技新闻"
 ```
 
 ## 编程方式使用
@@ -187,8 +207,9 @@ from ai_agent import AgentConfig
 
 config = AgentConfig(
     # LLM 配置
-    model="qwen2.5:7b",              # Ollama 模型名
-    ollama_host="http://localhost:11434",
+    model="deepseek-v4-flash",         # 模型名
+    api_key="sk-xxx",                  # API 密钥（也可通过 OPENAI_API_KEY 环境变量提供）
+    openai_base_url="https://api.deepseek.com/v1",  # API 地址，不提供则自动推断
     temperature=0.7,
     max_tokens=4096,
 
@@ -255,7 +276,7 @@ ai_agent/
 │   └── planner.py       # 任务复杂度评估、规划与重规划（replan）
 ├── llm/
 │   ├── base.py          # LLM 抽象接口（StreamEvent, LLMResponse）
-│   └── ollama.py        # Ollama 集成（原生 API + OpenAI 兼容双模式 + 流式 + think）
+│   └── openai.py        # OpenAI SDK 集成（流式 + think + 多 provider 兼容）
 ├── tools/
 │   ├── base.py          # 工具基类 + @tool 装饰器
 │   ├── registry.py      # 工具注册表
@@ -271,7 +292,6 @@ ai_agent/
 ## 运行示例
 
 ```bash
-cd ~/Documents/myagent
 uv run python ai_agent/example.py
 # 然后选择: 1(基础), 2(自定义工具), 3(文件操作), 4(记忆系统)
 ```

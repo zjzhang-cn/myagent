@@ -1,12 +1,13 @@
 [project]
 name = "ai-agent"
 version = "1.0.0"
-description = "基于 Ollama 本地模型的工具调用型智能 Agent，支持工具调用、任务规划与记忆系统"
+description = "基于 OpenAI API 的工具调用型智能 Agent，支持工具调用、任务规划与记忆系统"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.28.0",
     "beautifulsoup4>=4.12.0",
     "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.scripts]

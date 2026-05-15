@@ -12,7 +12,6 @@ AI Agent 使用示例
 
 from ai_agent.config import AgentConfig
 from ai_agent.core.agent import Agent
-from ai_agent.llm.ollama import OllamaLLM
 from ai_agent.tools.base import tool
 from ai_agent.tools.registry import ToolRegistry
 
@@ -86,15 +85,12 @@ def example_custom_tools():
     print("示例 2: 自定义工具")
     print("=" * 60)
 
-    config = AgentConfig(model="minimax-m2.5:cloud")
-    llm = OllamaLLM(model="minimax-m2.5:cloud")
-
     # 创建注册表并添加自定义工具
     registry = ToolRegistry()
     registry.register_function(get_weather)
     registry.register_function(calculate)
 
-    agent = Agent(config=config, llm=llm, tool_registry=registry)
+    agent = Agent(tool_registry=registry)
 
     print(f"已注册 {len(registry.list_tools())} 个工具:")
     for name in registry.list_tools():
@@ -122,16 +118,13 @@ def example_file_ops():
         write_file,
     )
 
-    config = AgentConfig(model="minimax-m2.5:cloud")
-    llm = OllamaLLM(model="minimax-m2.5:cloud")
-
     registry = ToolRegistry()
     registry.register_function(list_directory)
     registry.register_function(read_file)
     registry.register_function(write_file)
     registry.register_function(run_shell_command)
 
-    agent = Agent(config=config, llm=llm, tool_registry=registry)
+    agent = Agent(tool_registry=registry)
 
     result = agent.run("列出当前目录下的所有 Python 文件")
     print(f"Agent: {result.answer}")
@@ -147,9 +140,7 @@ def example_memory():
     print("示例 4: 记忆系统")
     print("=" * 60)
 
-    config = AgentConfig()
-    llm = OllamaLLM(model="minimax-m2.5:cloud")
-    agent = Agent(config=config, llm=llm)
+    agent = Agent()
 
     # 手动添加长期记忆
     agent.long_term.remember(

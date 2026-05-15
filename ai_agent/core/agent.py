@@ -223,10 +223,11 @@ class Agent:
 
         # LLM
         if llm is None:
-            from ai_agent.llm.ollama import OllamaLLM
-            llm = OllamaLLM(
+            from ai_agent.llm.openai import OpenAILLM
+            llm = OpenAILLM(
                 model=self.config.model,
-                host=self.config.ollama_host,
+                api_key=self.config.api_key,
+                base_url=self.config.openai_base_url,
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
             )
@@ -875,7 +876,7 @@ class Agent:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                tools = self.tool_registry.to_ollama_schemas()
+                tools = self.tool_registry.to_openai_schemas()
                 response = self.llm.chat(messages, tools=tools if tools else None)
 
                 if response.content or response.has_tool_calls():
@@ -904,7 +905,7 @@ class Agent:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                tools = self.tool_registry.to_ollama_schemas()
+                tools = self.tool_registry.to_openai_schemas()
                 full_content = ""
                 full_thinking = ""
                 final_tool_calls: list[dict] = []

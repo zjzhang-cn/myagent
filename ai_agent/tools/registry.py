@@ -50,10 +50,6 @@ class ToolRegistry:
         """列出所有工具定义"""
         return list(self._tools.values())
 
-    def to_ollama_schemas(self) -> list[dict]:
-        """生成 Ollama tools 参数"""
-        return [td.to_ollama_schema() for td in self._tools.values()]
-
     def to_openai_schemas(self) -> list[dict]:
         """生成 OpenAI tools 参数"""
         return [td.to_openai_schema() for td in self._tools.values()]

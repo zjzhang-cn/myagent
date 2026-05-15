@@ -57,34 +57,6 @@ class ToolDefinition:
             },
         }
 
-    def to_ollama_schema(self) -> dict:
-        """生成 Ollama 兼容的 tool schema"""
-        properties = {}
-        required = []
-        for p in self.parameters:
-            prop: dict[str, Any] = {
-                "type": p.type,
-                "description": p.description,
-            }
-            if p.enum:
-                prop["enum"] = p.enum
-            properties[p.name] = prop
-            if p.required:
-                required.append(p.name)
-
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            },
-        }
-
 
 class BaseTool(ABC):
     """工具抽象基类

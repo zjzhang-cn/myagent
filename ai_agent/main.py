@@ -10,7 +10,7 @@ AI Agent 主入口
     python -m ai_agent.main "帮我搜索今天的新闻"
 
     # 指定模型
-    python -m ai_agent.main --model qwen2.5:14b "分析这个项目结构"
+    python -m ai_agent.main --model deepseek-v4-flash "分析这个项目结构"
 
     # 列出可用模型
     python -m ai_agent.main --list-models
@@ -21,18 +21,15 @@ AI Agent 主入口
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from ai_agent.config import AgentConfig
 from ai_agent.core.agent import Agent
-from ai_agent.llm.ollama import OllamaLLM
-
-try:
-    from ai_agent.llm.openai import OpenAILLM
-except ImportError:
-    OpenAILLM = None  # type: ignore[assignment]
-
+from ai_agent.llm.openai import OpenAILLM
 from ai_agent.tools.builtin import (
     delete_file,
     fetch_url,
@@ -89,12 +86,10 @@ def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
 
 
 def create_agent(
-    model: str = "minimax-m2.5:cloud",
-    host: str = "http://localhost:11434",
-    provider: str = "ollama",
+    model: str | None = None,
     api_key: str | None = None,
     openai_base_url: str | None = None,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
@@ -103,38 +98,24 @@ def create_agent(
     enable_thinking: bool = False,
 ) -> Agent:
     """创建并配置 Agent"""
+    model = model or os.environ.get("AGENT_MODEL", "deepseek-v4-flash")
+    temperature = temperature if temperature is not None else float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
     config = AgentConfig(
         model=model,
-        provider=provider,
-        ollama_host=host,
         api_key=api_key,
         openai_base_url=openai_base_url,
         temperature=temperature,
         verbose=verbose,
     )
 
-    if provider == "openai":
-        if OpenAILLM is None:
-            raise ImportError(
-                "未安装 openai SDK，无法使用 OpenAI provider。"
-                "请运行: uv sync 或 pip install openai"
-            )
-        llm = OpenAILLM(
-            model=model,
-            api_key=api_key,
-            base_url=openai_base_url,
-            temperature=temperature,
-            response_log_path=response_log_path,
-            enable_thinking=enable_thinking,
-        )
-    else:
-        llm = OllamaLLM(
-            model=model,
-            host=host,
-            temperature=temperature,
-            response_log_path=response_log_path,
-            enable_thinking=enable_thinking,
-        )
+    llm = OpenAILLM(
+        model=model,
+        api_key=api_key,
+        base_url=openai_base_url,
+        temperature=temperature,
+        response_log_path=response_log_path,
+        enable_thinking=enable_thinking,
+    )
 
     # 创建工具注册表并注册内置工具
     registry = ToolRegistry()
@@ -320,37 +301,29 @@ def interactive_mode(agent: Agent) -> None:
         print()
 
 
-def list_models(host: str = "http://localhost:11434", provider: str = "ollama",
-                api_key: str | None = None, openai_base_url: str | None = None) -> None:
+def list_models(api_key: str | None = None,
+                openai_base_url: str | None = None) -> None:
     """列出可用模型"""
-    if provider == "openai":
-        if OpenAILLM is None:
-            print("错误：未安装 openai SDK，无法列出 OpenAI 模型。")
-            print("请运行: uv sync 或 pip install openai")
-            return
-        llm = OpenAILLM(api_key=api_key, base_url=openai_base_url)
-    else:
-        llm = OllamaLLM(host=host)
+    llm = OpenAILLM(api_key=api_key, base_url=openai_base_url)
     models = llm.list_models()
-    provider_label = f" ({provider})"
-    print(f"\n可用模型 ({len(models)} 个){provider_label}:")
+    print(f"\n可用模型 ({len(models)} 个):")
     for m in models:
         print(f"  • {m}")
     print()
 
 
 def main():
+    # 从 .env 文件加载环境变量（如果存在）
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
-        description="AI Agent - 基于 Ollama / OpenAI 的工具调用型智能 Agent",
+        description="AI Agent - 基于 OpenAI API 的工具调用型智能 Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                                    # 交互模式 (Ollama)
-  %(prog)s --provider openai --model gpt-4o   # 使用 OpenAI
-  %(prog)s "搜索今天的科技新闻"                  # 单次查询
-  %(prog)s --model qwen2.5:14b "分析代码"       # 指定模型
+  %(prog)s                                    # 交互模式
+  %(prog)s --model gpt-4o "搜索今天的科技新闻"    # 指定模型
   %(prog)s --list-models                       # 列出可用模型
-  %(prog)s --list-models --provider openai     # 列出 OpenAI 模型
         """,
     )
     parser.add_argument(
@@ -360,36 +333,25 @@ def main():
     )
     parser.add_argument(
         "--model", "-m",
-        default="minimax-m2.5:cloud",
-        help="模型名 (默认: minimax-m2.5:cloud)",
-    )
-    parser.add_argument(
-        "--provider", "-p",
-        default="ollama",
-        choices=["ollama", "openai"],
-        help="LLM 提供商 (默认: ollama, 可选: openai)",
-    )
-    parser.add_argument(
-        "--host",
-        default="http://localhost:11434",
-        help="Ollama 服务地址 (默认: http://localhost:11434)",
+        default=None,
+        help="模型名（可通过 AGENT_MODEL 环境变量或 .env 文件设置）",
     )
     parser.add_argument(
         "--api-key",
         default=None,
-        help="OpenAI API 密钥（也可通过 OPENAI_API_KEY 环境变量设置）",
+        help="API 密钥（也可通过 OPENAI_API_KEY 环境变量设置）",
     )
     parser.add_argument(
-        "--openai-base-url",
+        "--api-base-url",
         default=None,
         metavar="URL",
-        help="OpenAI API 基础地址（默认自动推断，也可通过 OPENAI_BASE_URL 环境变量设置）",
+        help="API 基础地址（默认自动推断，也可通过 OPENAI_BASE_URL 环境变量设置）",
     )
     parser.add_argument(
         "--temperature", "-t",
         type=float,
-        default=0.7,
-        help="生成温度 (默认: 0.7)",
+        default=None,
+        help="生成温度（可通过 AGENT_TEMPERATURE 环境变量或 .env 文件设置）",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -427,6 +389,12 @@ def main():
 
     args = parser.parse_args()
 
+    # 命令行参数的默认值从 env var / .env 中读取（滞后解析，确保 load_dotenv 已执行）
+    if args.model is None:
+        args.model = os.environ.get("AGENT_MODEL", "deepseek-v4-flash")
+    if args.temperature is None:
+        args.temperature = float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
+
     # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
     setup_logging(verbose=args.verbose, log_file=args.log_file)
 
@@ -439,10 +407,8 @@ def main():
 
     if args.list_models:
         list_models(
-            host=args.host,
-            provider=args.provider,
             api_key=args.api_key,
-            openai_base_url=args.openai_base_url,
+            openai_base_url=args.api_base_url,
         )
         return
 
@@ -454,10 +420,8 @@ def main():
     thinking_print, thinking_state = _make_thinking_printer()
     agent = create_agent(
         model=args.model,
-        host=args.host,
-        provider=args.provider,
         api_key=args.api_key,
-        openai_base_url=args.openai_base_url,
+        openai_base_url=args.api_base_url,
         temperature=args.temperature,
         verbose=args.verbose,
         on_step=_print_step,

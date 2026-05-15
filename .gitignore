@@ -18,6 +18,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Environment
+.env
+
 # Agent data
 *.db
 *.log

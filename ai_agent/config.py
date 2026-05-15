@@ -12,11 +12,9 @@ class AgentConfig:
     """Agent 全局配置"""
 
     # LLM 配置
-    model: str = "minimax-m2.5:cloud"  # 模型名
-    provider: str = "ollama"  # LLM 提供商: "ollama" | "openai"
-    ollama_host: str = "http://localhost:11434"  # Ollama 服务地址
-    api_key: str | None = None  # OpenAI API 密钥（不提供则从 OPENAI_API_KEY 环境变量读取）
-    openai_base_url: str | None = None  # OpenAI API 基础地址（不提供则自动推断）
+    model: str = "deepseek-v4-flash"  # 模型名
+    api_key: str | None = None  # API 密钥（不提供则从 OPENAI_API_KEY 环境变量读取）
+    openai_base_url: str | None = None  # API 基础地址（不提供则自动推断）
     temperature: float = 0.7
     max_tokens: int = 4096
 

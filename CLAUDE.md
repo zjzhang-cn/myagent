@@ -15,14 +15,14 @@ uv run python -m ai_agent.main
 # 单次查询模式
 uv run python -m ai_agent.main "你的问题"
 
-# 使用 OpenAI 提供商替代 Ollama
-uv run python -m ai_agent.main --provider openai --model gpt-4o "问题"
+# 指定模型
+uv run python -m ai_agent.main --model gpt-4o "问题"
 
 # 列出可用模型
 uv run python -m ai_agent.main --list-models
 
 # 启用推理 token 显示（用于推理模型如 DeepSeek-R1）
-uv run python -m ai_agent.main --think --model deepseek-r1:7b
+uv run python -m ai_agent.main --think --model deepseek-v4-flash
 
 # 记录 LLM 交互日志（生成 .log 和 .jsonl 文件）
 uv run python -m ai_agent.main --log-file agent.log "问题"
@@ -58,7 +58,6 @@ ai_agent/
 │   └── planner.py       # 复杂度评估、Plan/PlanStep、LLM 规划与重新规划
 ├── llm/
 │   ├── base.py          # BaseLLM 抽象基类、LLMResponse、StreamEvent
-│   ├── ollama.py        # Ollama 集成（原生 API + OpenAI 兼容双模式、流式、think 支持）
 │   └── openai.py        # OpenAI SDK 集成（自动推断 Base URL、流式、reasoning_content 支持）
 ├── tools/
 │   ├── base.py          # ToolDefinition、ToolParameter、@tool 装饰器
@@ -74,7 +73,7 @@ ai_agent/
 
 ### 关键设计决策
 
-- **双 LLM 后端**：OllamaLLM（本地模型，支持原生 Ollama API 和 OpenAI 兼容两种模式）和 OpenAILLM（OpenAI SDK，兼容 DeepSeek、Moonshot 等任何 OpenAI 兼容 API，根据模型名自动推断 Base URL）
+- **LLM 后端**：基于 OpenAI SDK，兼容任何 OpenAI 兼容 API（DeepSeek、Moonshot、GPT 等），根据模型名自动推断 Base URL
 - **工具调用**：同时支持 LLM 原生 Function Calling 和基于正则的 JSON / 中文函数调用风格文本解析。`core/agent.py` 中的 `ToolCallParser` 包含三级回退策略
 - **安全层**：线程本地的 `SecurityContext`，每次工具执行前设置。`sandbox_path()` 做两阶段路径验证（规范化检查 + realpath 符号链接检查）。`validate_shell_command()` 使用白名单 + 危险模式正则拦截。所有内置工具通过 `check_path()` / `check_command()` 路由
 - **三层记忆**：短期记忆（滑动窗口消息队列，支持 OpenAI 兼容的 tool_calls/reasoning_content 字段）、工作记忆（内存键值存储 + 步骤结果）、长期记忆（SQLite，关键词搜索 + 重要度排序）
