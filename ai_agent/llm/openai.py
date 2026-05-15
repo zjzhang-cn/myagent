@@ -1,8 +1,8 @@
 """
-OpenAI LLM 集成
+OpenAI LLM 集成（基于官方 openai SDK）
 
 支持 OpenAI API 及任何 OpenAI 兼容的 API（如 Azure、DeepSeek、Moonshot 等）。
-通过 /v1/chat/completions 接口进行聊天补全，支持流式和非流式两种调用方式。
+使用 openai.OpenAI 客户端，自动处理认证、重试、流式 SSE 解析和错误格式化。
 支持将原始 LLM 响应保存到 JSONL 文件（response_log_path）。
 """
 
@@ -12,31 +12,41 @@ import os
 import time
 from typing import Any, Generator
 
-import requests
+from openai import (
+    APIError,
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    BadRequestError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from ai_agent.llm.base import BaseLLM, LLMResponse, StreamEvent
 
 logger = logging.getLogger(__name__)
 
-# 常见的 OpenAI 兼容 API 基础地址
-KNOWN_BASE_URLS = {
-    "openai": "https://api.openai.com",
+# 常见的 OpenAI 兼容 API 基础地址（含 API 版本路径）
+KNOWN_BASE_URLS: dict[str, str | None] = {
+    "openai": "https://api.openai.com/v1",
     "azure": None,  # Azure 需要用户指定完整 endpoint
-    "deepseek": "https://api.deepseek.com",
-    "moonshot": "https://api.moonshot.cn",
+    "deepseek": "https://api.deepseek.com/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode",
-    "siliconflow": "https://api.siliconflow.cn",
-    "groq": "https://api.groq.com/openai",
-    "together": "https://api.together.xyz",
-    "fireworks": "https://api.fireworks.ai/inference",
-    "xai": "https://api.x.ai",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "together": "https://api.together.xyz/v1",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+    "xai": "https://api.x.ai/v1",
     "custom": None,
 }
 
 
 class OpenAILLM(BaseLLM):
-    """OpenAI API 及兼容 API 的 LLM 实现"""
+    """OpenAI API 及兼容 API 的 LLM 实现（基于 openai SDK）"""
 
     def __init__(
         self,
@@ -48,18 +58,20 @@ class OpenAILLM(BaseLLM):
         response_log_path: str | None = None,
         enable_thinking: bool = False,
         extra_headers: dict | None = None,
+        max_retries: int = 2,
     ):
         """
         Args:
-            model: 模型名（如 gpt-4o, gpt-4o-mini, deepseek-chat 等）
+            model: 模型名（如 gpt-4o, deepseek-chat 等）
             api_key: API 密钥。不提供则从 OPENAI_API_KEY 环境变量读取。
-            base_url: API 基础地址（如 https://api.openai.com）。
-                      不提供则根据 model 或 OPENAI_BASE_URL 环境变量自动推断。
+            base_url: API 基础地址（含版本路径，如 https://api.openai.com/v1）。
+                      不提供则根据 model 名或 OPENAI_BASE_URL 环境变量自动推断。
             temperature: 生成温度
             max_tokens: 最大生成 token 数
-            response_log_path: 原始响应 JSONL 文件路径（追加写入每条完整响应）
-            enable_thinking: 启用模型推理（部分模型支持，如 o1 系列）
+            response_log_path: 原始响应 JSONL 文件路径
+            enable_thinking: 启用模型推理（部分模型如 o1 系列支持）
             extra_headers: 额外的 HTTP 请求头
+            max_retries: 自动重试次数（SDK 内置）
         """
         self._model = model
         self.temperature = temperature
@@ -67,11 +79,15 @@ class OpenAILLM(BaseLLM):
         self.response_log_path = response_log_path
         self.enable_thinking = enable_thinking
         self.extra_headers = extra_headers or {}
+        self.max_retries = max_retries
 
         # API 密钥：参数 > 环境变量
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not self.api_key:
-            logger.warning("未设置 OpenAI API Key，请通过 api_key 参数或 OPENAI_API_KEY 环境变量提供")
+            logger.warning(
+                "未设置 OpenAI API Key，"
+                "请通过 api_key 参数或 OPENAI_API_KEY 环境变量提供"
+            )
 
         # 基础地址：参数 > 环境变量 > 已知地址推断 > OpenAI 默认
         if base_url:
@@ -81,12 +97,16 @@ class OpenAILLM(BaseLLM):
         else:
             self.base_url = self._infer_base_url(model)
 
-        # 构建认证头
-        self._auth_headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            **self.extra_headers,
+        # 创建 OpenAI 客户端（SDK 自动处理认证、重试、超时等）
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "max_retries": max_retries,
+            "timeout": 120.0,
         }
+        if self.extra_headers:
+            client_kwargs["default_headers"] = self.extra_headers
+        self._client = OpenAI(**client_kwargs)
 
         # 确保日志文件目录存在
         if response_log_path:
@@ -108,29 +128,18 @@ class OpenAILLM(BaseLLM):
         tools: list[dict] | None = None,
     ) -> LLMResponse:
         """发送聊天请求到 OpenAI API（非流式）"""
-        url = f"{self.base_url}/v1/chat/completions"
-
         openai_tools = self._convert_tools(tools)
-        payload = self._build_payload(messages, openai_tools, stream=False)
+        params = self._build_params(messages, openai_tools, stream=False)
 
         self._log_request(messages, tools)
 
-        resp = None
         try:
-            resp = requests.post(
-                url,
-                json=payload,
-                headers=self._auth_headers,
-                timeout=120,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            result = self._parse_response(data)
+            response = self._client.chat.completions.create(**params)
+            result = self._parse_sdk_response(response)
             self._log_response(result)
             return result
-        except requests.RequestException as e:
-            err_detail = self._log_api_error(resp, e, payload=payload)
+        except APIError as e:
+            err_detail = self._log_sdk_error(e, params=params)
             return LLMResponse(
                 content=f"调用 LLM 失败: {e}\n\n{err_detail}",
                 tool_calls=[],
@@ -146,86 +155,72 @@ class OpenAILLM(BaseLLM):
         tools: list[dict] | None = None,
     ) -> Generator[StreamEvent, None, None]:
         """流式聊天请求，逐 token 返回"""
-        url = f"{self.base_url}/v1/chat/completions"
-
         openai_tools = self._convert_tools(tools)
-        payload = self._build_payload(messages, openai_tools, stream=True)
-        # 流式请求需要 stream_options 来获取 usage 信息
-        payload["stream_options"] = {"include_usage": True}
+        params = self._build_params(messages, openai_tools, stream=True)
+        params["stream_options"] = {"include_usage": True}
 
         self._log_request(messages, tools)
 
         full_content = ""
         full_thinking = ""
-        tool_call_chunks: dict[int, dict] = {}  # index -> {id, name, arguments_str}
-        usage = {}
+        tool_call_chunks: dict[int, dict] = {}
+        usage: dict = {}
         finish_reason = "stop"
 
-        resp = None
         try:
-            with requests.post(
-                url,
-                json=payload,
-                headers=self._auth_headers,
-                stream=True,
-                timeout=120,
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines(decode_unicode=True):
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[6:]  # 去掉 "data: " 前缀
-                    if data_str.strip() == "[DONE]":
-                        break
+            stream = self._client.chat.completions.create(**params)
+            for chunk in stream:
+                # SDK 在流式模式下有时会在最后一个 chunk 附带 usage
+                if chunk.usage:
+                    usage = {
+                        "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                        "completion_tokens": chunk.usage.completion_tokens or 0,
+                        "total_tokens": chunk.usage.total_tokens or 0,
+                    }
 
-                    try:
-                        chunk = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+                choices = chunk.choices or []
+                if not choices:
+                    continue
 
-                    if "usage" in chunk:
-                        usage = chunk["usage"]
+                choice = choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
 
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    if choices[0].get("finish_reason"):
-                        finish_reason = choices[0]["finish_reason"]
+                delta = choice.delta
+                if delta is None:
+                    continue
 
-                    delta = choices[0].get("delta", {})
+                # 推理 token（reasoning_content / thinking）
+                think_token = getattr(delta, "reasoning_content", "") or ""
+                if think_token:
+                    full_thinking += think_token
+                    yield StreamEvent(type="thinking", content=think_token)
 
-                    # 推理 token（部分模型如 o1、DeepSeek-R1 支持 thinking/reasoning_content）
-                    think_token = delta.get("reasoning_content", "") or delta.get("thinking", "")
-                    if think_token:
-                        full_thinking += think_token
-                        yield StreamEvent(type="thinking", content=think_token)
+                # 普通文本 token
+                token = delta.content or ""
+                if token:
+                    full_content += token
+                    yield StreamEvent(type="token", content=token)
 
-                    # 普通 token
-                    token = delta.get("content", "")
-                    if token:
-                        full_content += token
-                        yield StreamEvent(type="token", content=token)
+                # 累积 tool_calls（流式模式下分多个 chunk 传输）
+                for tc in delta.tool_calls or []:
+                    idx = tc.index
+                    if idx not in tool_call_chunks:
+                        tool_call_chunks[idx] = {
+                            "id": tc.id or "",
+                            "name": "",
+                            "arguments_str": "",
+                        }
+                    entry = tool_call_chunks[idx]
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if tc.function and tc.function.name:
+                        entry["name"] += tc.function.name
+                    if tc.function and tc.function.arguments:
+                        entry["arguments_str"] += tc.function.arguments
 
-                    # 累积 tool_calls（流式模式下分多个 chunk 传输）
-                    for tc in delta.get("tool_calls", []):
-                        idx = tc.get("index", 0)
-                        if idx not in tool_call_chunks:
-                            tool_call_chunks[idx] = {
-                                "id": "",
-                                "name": "",
-                                "arguments_str": "",
-                            }
-                        entry = tool_call_chunks[idx]
-                        if tc.get("id"):
-                            entry["id"] = tc["id"]
-                        func = tc.get("function", {})
-                        if func.get("name"):
-                            entry["name"] += func["name"]
-                        if func.get("arguments"):
-                            entry["arguments_str"] += func["arguments"]
-
-        except requests.RequestException as e:
-            err_detail = self._log_api_error(resp, e, payload=payload)
+        except APIError as e:
+            err_detail = self._log_sdk_error(e, params=params)
             yield StreamEvent(
                 type="done",
                 content=f"调用 LLM 失败: {e}\n\n{err_detail}",
@@ -246,16 +241,10 @@ class OpenAILLM(BaseLLM):
                     "arguments": args,
                 })
 
-        final_usage = {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-
         logger.debug(
             f"[LLM 流式响应] content={full_content[:300]!r}, "
             f"tool_calls={[tc['name'] for tc in tool_calls]}, "
-            f"usage={final_usage}"
+            f"usage={usage}"
         )
 
         # 保存原始响应
@@ -264,7 +253,7 @@ class OpenAILLM(BaseLLM):
             thinking=full_thinking.strip(),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            usage=final_usage,
+            usage=usage,
         ))
 
         yield StreamEvent(
@@ -273,7 +262,7 @@ class OpenAILLM(BaseLLM):
             thinking=full_thinking.strip(),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
-            usage=final_usage,
+            usage=usage,
         )
 
     # ----------------------------------------------------------
@@ -283,17 +272,12 @@ class OpenAILLM(BaseLLM):
     def list_models(self) -> list[str]:
         """获取可用模型列表（从 API 获取，失败则返回当前模型）"""
         try:
-            resp = requests.get(
-                f"{self.base_url}/v1/models",
-                headers=self._auth_headers,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            models = [m["id"] for m in data.get("data", [])]
-            models.sort()
-            return models
-        except requests.RequestException as e:
+            models_page = self._client.models.list()
+            # SDK 返回 SyncPage[Model]，可直接迭代
+            model_ids = [m.id for m in models_page]
+            model_ids.sort()
+            return model_ids
+        except APIError as e:
             logger.warning(f"获取模型列表失败: {e}")
             return [self._model]
 
@@ -301,36 +285,30 @@ class OpenAILLM(BaseLLM):
     # 辅助方法
     # ----------------------------------------------------------
 
-    def _build_payload(
+    def _build_params(
         self,
         messages: list[dict],
         tools: list[dict] | None,
         stream: bool = False,
     ) -> dict[str, Any]:
-        """构建请求 payload"""
-        payload: dict[str, Any] = {
+        """构建 SDK create() 参数"""
+        params: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
             "stream": stream,
         }
 
         if tools:
-            payload["tools"] = tools
+            params["tools"] = tools
 
-        # o1 系列模型不支持 temperature 和 system role 的一些特性
-        if self._model.startswith("o1") or self._model.startswith("o3"):
-            payload.pop("temperature", None)
-            # o1 使用 max_completion_tokens 而非 max_tokens
-            payload["max_completion_tokens"] = payload.pop("max_tokens", 4096)
+        # o1/o3 系列：不支持 temperature，用 max_completion_tokens
+        if self._model.startswith(("o1", "o3")):
+            params["max_completion_tokens"] = self.max_tokens
+        else:
+            params["temperature"] = self.temperature
+            params["max_tokens"] = self.max_tokens
 
-        # 启用推理（部分模型需要通过额外参数）
-        if self.enable_thinking:
-            # DeepSeek-R1 等推理模型不需要特殊参数，thinking 会自动包含在响应中
-            pass
-
-        return payload
+        return params
 
     def _convert_tools(self, tools: list[dict] | None) -> list[dict] | None:
         """将内部工具格式转换为 OpenAI function calling 格式"""
@@ -339,7 +317,6 @@ class OpenAILLM(BaseLLM):
 
         openai_tools = []
         for tool in tools:
-            # 兼容两种格式：{name, description, parameters} 或 {function: {name, ...}}
             if "function" in tool:
                 # 已经是 OpenAI 格式
                 openai_tools.append(tool)
@@ -358,40 +335,39 @@ class OpenAILLM(BaseLLM):
                 })
         return openai_tools
 
-    def _parse_response(self, data: dict) -> LLMResponse:
-        """解析 OpenAI API 响应为 LLMResponse"""
-        choice = data["choices"][0]
-        message = choice.get("message", {})
-        content = message.get("content", "") or ""
+    def _parse_sdk_response(self, response) -> LLMResponse:
+        """解析 SDK 响应对象为 LLMResponse"""
+        choice = response.choices[0]
+        message = choice.message
 
-        # 推理内容（部分模型在 reasoning_content 字段返回）
-        thinking = message.get("reasoning_content", "") or message.get("thinking", "") or ""
+        content = message.content or ""
 
-        # 解析 tool_calls（OpenAI 格式）
+        # 推理内容（reasoning_content 是部分模型的扩展字段）
+        thinking = getattr(message, "reasoning_content", "") or ""
+
+        # 解析 tool_calls
         tc_list = []
-        raw_tool_calls = message.get("tool_calls", [])
-        for tc in raw_tool_calls:
-            func = tc.get("function", {})
+        for tc in message.tool_calls or []:
             try:
-                args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
+                args = json.loads(tc.function.arguments)
+            except (json.JSONDecodeError, AttributeError):
                 args = {}
             tc_list.append({
-                "id": tc.get("id", ""),
-                "name": func.get("name", ""),
+                "id": tc.id,
+                "name": tc.function.name,
                 "arguments": args,
             })
 
-        usage_data = data.get("usage", {})
+        usage_data = response.usage
         return LLMResponse(
             content=content.strip(),
             thinking=thinking.strip() if thinking else "",
             tool_calls=tc_list,
-            finish_reason=choice.get("finish_reason", "stop"),
+            finish_reason=choice.finish_reason or "stop",
             usage={
-                "prompt_tokens": usage_data.get("prompt_tokens", 0),
-                "completion_tokens": usage_data.get("completion_tokens", 0),
-                "total_tokens": usage_data.get("total_tokens", 0),
+                "prompt_tokens": usage_data.prompt_tokens if usage_data else 0,
+                "completion_tokens": usage_data.completion_tokens if usage_data else 0,
+                "total_tokens": usage_data.total_tokens if usage_data else 0,
             },
         )
 
@@ -399,7 +375,6 @@ class OpenAILLM(BaseLLM):
         """根据模型名推断 API 基础地址"""
         model_lower = model.lower()
 
-        # 按优先级匹配
         provider_patterns = [
             ("deepseek", "deepseek"),
             ("moonshot", "moonshot"),
@@ -408,8 +383,6 @@ class OpenAILLM(BaseLLM):
             ("chatglm", "zhipu"),
             ("qwen", "qwen"),
             ("qwq", "qwen"),
-            ("deepseek-r1", "deepseek"),
-            ("deepseek-v3", "deepseek"),
             ("siliconflow", "siliconflow"),
             ("groq", "groq"),
             ("llama", "together"),
@@ -425,9 +398,8 @@ class OpenAILLM(BaseLLM):
                     logger.info(f"根据模型 '{model}' 自动推断 API 地址: {base}")
                     return base
 
-        # 默认 OpenAI
         logger.info(f"使用默认 OpenAI API 地址，模型: {model}")
-        return "https://api.openai.com"
+        return "https://api.openai.com/v1"
 
     # ----------------------------------------------------------
     # 日志辅助
@@ -461,73 +433,82 @@ class OpenAILLM(BaseLLM):
         )
         self._save_raw_response(response)
 
-    def _log_api_error(
-        self,
-        resp: requests.Response | None,
-        error: Exception,
-        payload: dict | None = None,
-    ) -> str:
-        """记录 API 错误详情，返回详细的错误描述字符串"""
+    def _log_sdk_error(self, error: APIError, params: dict | None = None) -> str:
+        """记录 SDK 错误详情，返回详细描述字符串"""
         lines = []
-        lines.append(f"状态码: {resp.status_code if resp is not None else 'N/A'}")
-        lines.append(f"异常: {error}")
+        lines.append(f"异常类型: {type(error).__name__}")
+        lines.append(f"异常信息: {error}")
 
         # 请求信息
-        if payload:
+        if params:
             lines.append(f"\n{'─' * 40}")
             lines.append("📤 请求详情:")
-            lines.append(f"  URL: {self.base_url}/v1/chat/completions")
+            lines.append(f"  URL: {self.base_url}/chat/completions")
             lines.append(f"  Model: {self._model}")
             lines.append(f"  Temperature: {self.temperature}")
             lines.append(f"  Max tokens: {self.max_tokens}")
-            lines.append(f"  Stream: {payload.get('stream', False)}")
-            lines.append(f"  Messages count: {len(payload.get('messages', []))}")
+            lines.append(f"  Stream: {params.get('stream', False)}")
+            lines.append(f"  Messages count: {len(params.get('messages', []))}")
 
-            # 打印消息摘要（每条消息前200字符）
-            messages = payload.get("messages", [])
+            messages = params.get("messages", [])
             for i, msg in enumerate(messages):
                 role = msg.get("role", "?")
                 content = msg.get("content", "")[:200]
                 extra = ""
                 if msg.get("tool_calls"):
-                    tc_names = [tc.get("function", {}).get("name", "?") for tc in msg["tool_calls"]]
+                    tc_names = [tc.get("function", {}).get("name", "?")
+                                for tc in msg["tool_calls"]]
                     extra = f", tool_calls={tc_names}"
                 if msg.get("tool_call_id"):
                     extra = f", tool_call_id={msg['tool_call_id']}"
                 lines.append(f"  [{i}] role={role}{extra}: {content[:200]}")
 
-            tools = payload.get("tools", [])
+            tools = params.get("tools", [])
             if tools:
                 tool_names = [t.get("function", {}).get("name", "?") for t in tools]
                 lines.append(f"  Tools: {tool_names}")
 
-        # 响应信息
-        if resp is not None:
-            lines.append(f"\n{'─' * 40}")
-            lines.append("📥 响应详情:")
+        # 响应信息（SDK 错误对象自带详细信息）
+        lines.append(f"\n{'─' * 40}")
+        lines.append("📥 错误详情:")
+        if isinstance(error, APIStatusError):
+            lines.append(f"  HTTP Status: {error.status_code}")
+            lines.append(f"  Request ID: {error.request_id or 'N/A'}")
             try:
-                body = resp.text[:2000]
+                body_preview = str(error.body)[:2000] if error.body else "(空)"
+                lines.append(f"  Body: {body_preview}")
             except Exception:
-                body = "(无法读取响应体)"
-            lines.append(f"  Status: {resp.status_code}")
-            lines.append(f"  Body: {body}")
+                lines.append("  Body: (无法读取)")
+        elif isinstance(error, APIConnectionError):
+            lines.append("  类型: 连接错误（网络不可达或超时）")
+            lines.append(f"  详情: {error}")
 
         detail = "\n".join(lines)
         logger.error(detail)
 
-        # 保存错误日志到 JSONL（供离线排查）
-        if self.response_log_path and payload:
+        # 保存错误日志到 JSONL
+        if self.response_log_path and params:
             error_entry = {
                 "type": "error",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "model": self._model,
                 "provider": "openai",
                 "base_url": self.base_url,
+                "error_type": type(error).__name__,
                 "error": str(error),
-                "status_code": resp.status_code if resp is not None else None,
-                "response_body": resp.text[:3000] if resp is not None and hasattr(resp, 'text') else None,
-                "request_payload": payload,
+                "status_code": error.status_code if isinstance(error, APIStatusError) else None,
+                "response_body": str(error.body)[:3000] if isinstance(error, APIStatusError) and error.body else None,
+                "request_payload": {
+                    "model": self._model,
+                    "messages": params.get("messages", []),
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "stream": params.get("stream", False),
+                    "tools": params.get("tools", []),
+                },
             }
+            if params.get("stream_options"):
+                error_entry["request_payload"]["stream_options"] = params["stream_options"]
             self._write_jsonl(error_entry)
 
         return detail

@@ -13,7 +13,12 @@ from ai_agent.core.agent import Agent, AgentResult, AgentState
 from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, PlanStep, StepStatus
 from ai_agent.llm.ollama import OllamaLLM
-from ai_agent.llm.openai import OpenAILLM
+
+try:
+    from ai_agent.llm.openai import OpenAILLM
+except ImportError:
+    OpenAILLM = None  # type: ignore[assignment]
+
 from ai_agent.tools.base import tool
 from ai_agent.tools.registry import ToolRegistry, get_registry
 

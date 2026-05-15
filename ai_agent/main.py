@@ -27,7 +27,12 @@ from pathlib import Path
 from ai_agent.config import AgentConfig
 from ai_agent.core.agent import Agent
 from ai_agent.llm.ollama import OllamaLLM
-from ai_agent.llm.openai import OpenAILLM
+
+try:
+    from ai_agent.llm.openai import OpenAILLM
+except ImportError:
+    OpenAILLM = None  # type: ignore[assignment]
+
 from ai_agent.tools.builtin import (
     delete_file,
     fetch_url,
@@ -109,6 +114,11 @@ def create_agent(
     )
 
     if provider == "openai":
+        if OpenAILLM is None:
+            raise ImportError(
+                "未安装 openai SDK，无法使用 OpenAI provider。"
+                "请运行: uv sync 或 pip install openai"
+            )
         llm = OpenAILLM(
             model=model,
             api_key=api_key,
@@ -314,6 +324,10 @@ def list_models(host: str = "http://localhost:11434", provider: str = "ollama",
                 api_key: str | None = None, openai_base_url: str | None = None) -> None:
     """列出可用模型"""
     if provider == "openai":
+        if OpenAILLM is None:
+            print("错误：未安装 openai SDK，无法列出 OpenAI 模型。")
+            print("请运行: uv sync 或 pip install openai")
+            return
         llm = OpenAILLM(api_key=api_key, base_url=openai_base_url)
     else:
         llm = OllamaLLM(host=host)
