@@ -44,6 +44,25 @@ class Message:
             d["tool_call_id"] = self.metadata["tool_call_id"]
         return d
 
+    def to_serializable(self) -> dict:
+        """全字段序列化（含 timestamp 和完整的 metadata），用于持久化存储"""
+        return {
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "metadata": self.metadata,
+        }
+
+    @staticmethod
+    def from_serializable(data: dict) -> "Message":
+        """从序列化数据恢复 Message 对象"""
+        return Message(
+            role=data["role"],
+            content=data["content"],
+            timestamp=data.get("timestamp", time.time()),
+            metadata=data.get("metadata", {}),
+        )
+
 
 class ShortTermMemory:
     """短期记忆：滑动窗口对话历史"""
@@ -95,6 +114,24 @@ class ShortTermMemory:
     def clear(self) -> None:
         """清空记忆（保留系统提示词）"""
         self._messages.clear()
+
+    def to_serializable(self) -> dict:
+        """序列化短期记忆为可 JSON 序列化的 dict"""
+        return {
+            "max_size": self.max_size,
+            "system_prompt": self.system_prompt,
+            "messages": [msg.to_serializable() for msg in self._messages],
+        }
+
+    @classmethod
+    def from_serializable(cls, data: dict) -> "ShortTermMemory":
+        """从序列化数据恢复短期记忆"""
+        mem = cls(max_size=data.get("max_size", 20))
+        if data.get("system_prompt"):
+            mem.set_system_prompt(data["system_prompt"])
+        for msg_data in data.get("messages", []):
+            mem._messages.append(Message.from_serializable(msg_data))
+        return mem
 
     def summary(self) -> str:
         """生成记忆摘要"""
@@ -188,6 +225,25 @@ class WorkingMemory:
         self._current_task = ""
         self._task_state = "idle"
         self._step_results.clear()
+
+    def to_serializable(self) -> dict:
+        """序列化工作记忆为可 JSON 序列化的 dict"""
+        return {
+            "store": self._store,
+            "current_task": self._current_task,
+            "task_state": self._task_state,
+            "step_results": self._step_results,
+        }
+
+    @classmethod
+    def from_serializable(cls, data: dict) -> "WorkingMemory":
+        """从序列化数据恢复工作记忆"""
+        wm = cls()
+        wm._store = data.get("store", {})
+        wm._current_task = data.get("current_task", "")
+        wm._task_state = data.get("task_state", "idle")
+        wm._step_results = data.get("step_results", [])
+        return wm
 
 
 # ============================================================

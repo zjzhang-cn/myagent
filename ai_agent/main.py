@@ -240,7 +240,7 @@ def interactive_mode(agent: Agent) -> None:
     print(f"🤖 AI Agent (模型: {agent.llm.model_name})")
     print(f"📦 可用工具: {len(agent.tool_registry.list_tools())} 个")
     print(f"🧠 规划: {'启用' if agent.config.enable_planning else '关闭'}")
-    print("命令: /quit 退出  /reset 重置  /tools 工具列表  /memory 记忆管理")
+    print("命令: /quit 退出  /reset 重置  /tools 工具列表  /state 状态管理  /memory 记忆管理")
     print("=" * 60 + "\n")
 
     while True:
@@ -268,13 +268,90 @@ def interactive_mode(agent: Agent) -> None:
             print("✅ Agent 已重置")
             continue
 
-        if lowered in ("tools", "help"):
-            print("\n可用工具：")
+        if lowered in ("tools",):
             print("\n可用工具：")
             for td in agent.tool_registry.list_definitions():
                 params = ", ".join(p.name for p in td.parameters)
                 print(f"  • {td.name}({params}): {td.description}")
             print()
+            continue
+
+        if lowered in ("help", "h"):
+            print("""
+可用命令:
+  /help, /h             显示此帮助
+  /tools                列出可用工具
+  /state save <name>    保存当前会话状态
+  /state load <name>    加载/切换到指定状态
+  /state list           列出所有已保存状态
+  /state delete <name>  删除指定状态
+  /memory help          记忆管理（查看/搜索/添加历史记忆）
+  /reset, /clear        重置 Agent 状态（清空对话）
+  /quit, /exit, /q      退出
+            """.strip())
+            print()
+            continue
+
+        if lowered.startswith("state"):
+            parts = user_input.split(maxsplit=2)
+            cmd = parts[1] if len(parts) > 1 else "list"
+
+            if cmd == "save" and len(parts) > 2:
+                name = parts[2]
+                try:
+                    fpath = agent.save_state(name)
+                    print(f"\n✅ 状态已保存: {fpath}\n")
+                except Exception as e:
+                    print(f"\n❌ 保存失败: {e}\n")
+
+            elif cmd == "load" and len(parts) > 2:
+                name = parts[2]
+                success = agent.load_state(name)
+                if success:
+                    plan_info = ""
+                    if agent.current_plan:
+                        plan_info = f" (计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步)"
+                    print(f"\n✅ 状态已加载: {name}{plan_info}\n")
+                else:
+                    print(f"\n❌ 未找到状态: {name}\n")
+
+            elif cmd == "list":
+                states = agent.list_states()
+                if not states:
+                    print("\n暂无已保存的状态。\n")
+                else:
+                    print(f"\n已保存的状态 ({len(states)} 个):")
+                    print("-" * 60)
+                    for s in states:
+                        print(f"  📁 {s['name']}")
+                        if s.get("saved_at"):
+                            print(f"     保存时间: {s['saved_at'][:19]}")
+                        if s.get("model"):
+                            print(f"     模型: {s['model']}")
+                        if s.get("agent_state"):
+                            print(f"     状态: {s['agent_state']}")
+                        print()
+                print()
+
+            elif cmd == "delete" and len(parts) > 2:
+                name = parts[2]
+                success = agent.delete_state(name)
+                if success:
+                    print(f"\n✅ 已删除状态: {name}\n")
+                else:
+                    print(f"\n❌ 未找到状态: {name}\n")
+
+            elif cmd == "help":
+                print("""
+状态管理命令:
+  state save <name>     保存当前会话状态
+  state load <name>     加载/切换到指定状态
+  state list            列出所有已保存状态
+  state delete <name>   删除指定状态
+                """)
+
+            else:
+                print(f"\n未知子命令: {cmd}，可用命令: save, load, list, delete, help\n")
             continue
 
         if lowered.startswith("memory"):

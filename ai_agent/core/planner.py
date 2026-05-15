@@ -122,7 +122,34 @@ class Plan:
             "task": self.task,
             "steps": [s.to_dict() for s in self.steps],
             "created_at": self.created_at,
+            "current_step_index": self.current_step_index,
         }
+
+    @staticmethod
+    def from_dict(data: dict) -> "Plan":
+        """从序列化字典恢复 Plan 对象"""
+        steps = []
+        for s in data.get("steps", []):
+            status_str = s.get("status", "pending")
+            try:
+                status = StepStatus(status_str)
+            except ValueError:
+                status = StepStatus.PENDING
+            steps.append(PlanStep(
+                id=s["id"],
+                description=s["description"],
+                status=status,
+                result=s.get("result", ""),
+                dependencies=s.get("dependencies", []),
+                tool_hint=s.get("tool_hint", ""),
+            ))
+        plan = Plan(
+            task=data.get("task", ""),
+            steps=steps,
+            created_at=data.get("created_at", ""),
+            current_step_index=data.get("current_step_index", 0),
+        )
+        return plan
 
 
 # ============================================================

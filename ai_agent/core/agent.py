@@ -9,6 +9,7 @@ Agent 运行流程：
 
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -662,6 +663,160 @@ class Agent:
         """完全重置 Agent"""
         self.clear_memory()
         self.state = AgentState.IDLE
+
+    # ----------------------------------------------------------
+    # 状态持久化管理
+    # ----------------------------------------------------------
+
+    def _get_state_dir(self) -> str:
+        """获取状态存储目录路径，确保目录存在"""
+        state_dir = os.path.expanduser(self.config.state_dir)
+        os.makedirs(state_dir, exist_ok=True)
+        return state_dir
+
+    def save_state(self, name: str) -> str:
+        """保存当前 Agent 状态到文件
+
+        Args:
+            name: 状态名称（用于加载/切换）
+
+        Returns:
+            状态文件的绝对路径
+        """
+        import datetime
+
+        # 确保 _no_toolcall_streak 存在
+        no_toolcall_streak = getattr(self, '_no_toolcall_streak', 0)
+
+        state_data = {
+            "name": name,
+            "saved_at": datetime.datetime.now().isoformat(),
+            "meta": {
+                "model": self.llm.model_name,
+                "agent_state": self.state.value if isinstance(self.state, AgentState) else str(self.state),
+                "replan_count": self._replan_count,
+                "no_toolcall_streak": no_toolcall_streak,
+            },
+            "short_term_memory": self.short_term.to_serializable(),
+            "working_memory": self.working.to_serializable(),
+            "plan": self.current_plan.to_dict() if self.current_plan else None,
+        }
+
+        state_dir = self._get_state_dir()
+        safe_name = re.sub(r'[^\w\-]', '_', name)
+        filepath = os.path.join(state_dir, f"{safe_name}.json")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, ensure_ascii=False, indent=2, default=str)
+
+        logger.info(f"状态已保存: {filepath}")
+        return filepath
+
+    def load_state(self, name: str) -> bool:
+        """从文件加载 Agent 状态（替换当前状态）
+
+        Args:
+            name: 状态名称
+
+        Returns:
+            是否成功加载
+        """
+        state_dir = self._get_state_dir()
+        safe_name = re.sub(r'[^\w\-]', '_', name)
+        filepath = os.path.join(state_dir, f"{safe_name}.json")
+
+        if not os.path.exists(filepath):
+            logger.warning(f"状态文件不存在: {filepath}")
+            return False
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"读取状态文件失败: {e}")
+            return False
+
+        # 恢复短期记忆
+        if "short_term_memory" in state_data:
+            from ai_agent.core.memory import ShortTermMemory
+            self.short_term = ShortTermMemory.from_serializable(state_data["short_term_memory"])
+
+        # 恢复工作记忆
+        if "working_memory" in state_data:
+            from ai_agent.core.memory import WorkingMemory
+            self.working = WorkingMemory.from_serializable(state_data["working_memory"])
+
+        # 恢复计划
+        if state_data.get("plan"):
+            from ai_agent.core.planner import Plan
+            self.current_plan = Plan.from_dict(state_data["plan"])
+        else:
+            self.current_plan = None
+
+        # 恢复元状态
+        meta = state_data.get("meta", {})
+        self._replan_count = meta.get("replan_count", 0)
+        self._no_toolcall_streak = meta.get("no_toolcall_streak", 0)
+
+        agent_state_str = meta.get("agent_state", "idle")
+        try:
+            self.state = AgentState(agent_state_str)
+        except ValueError:
+            self.state = AgentState.IDLE
+
+        logger.info(f"状态已加载: {filepath}")
+        return True
+
+    def list_states(self) -> list[dict]:
+        """列出所有已保存的状态
+
+        Returns:
+            状态信息列表，每项包含 name, saved_at, model, agent_state
+        """
+        state_dir = self._get_state_dir()
+        if not os.path.isdir(state_dir):
+            return []
+
+        states = []
+        for fname in sorted(os.listdir(state_dir)):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(state_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                states.append({
+                    "name": data.get("name", fname[:-5]),
+                    "saved_at": data.get("saved_at", ""),
+                    "model": data.get("meta", {}).get("model", ""),
+                    "agent_state": data.get("meta", {}).get("agent_state", ""),
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
+        return states
+
+    def delete_state(self, name: str) -> bool:
+        """删除指定名称的状态文件
+
+        Args:
+            name: 状态名称
+
+        Returns:
+            是否成功删除
+        """
+        state_dir = self._get_state_dir()
+        safe_name = re.sub(r'[^\w\-]', '_', name)
+        filepath = os.path.join(state_dir, f"{safe_name}.json")
+        if not os.path.exists(filepath):
+            logger.warning(f"状态文件不存在: {filepath}")
+            return False
+        try:
+            os.remove(filepath)
+            logger.info(f"状态已删除: {filepath}")
+            return True
+        except OSError as e:
+            logger.error(f"删除状态文件失败: {e}")
+            return False
 
     # ----------------------------------------------------------
     # 内部方法

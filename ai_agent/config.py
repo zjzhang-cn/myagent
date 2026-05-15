@@ -37,6 +37,7 @@ class AgentConfig:
     # 记忆配置
     short_term_memory_size: int = 20  # 最近 N 轮对话
     long_term_memory_path: str = "~/.ai_agent/long_term_memory.json"
+    state_dir: str = "~/.ai_agent/sessions"  # 会话状态文件存储目录
 
     # 工具配置
     tools_dir: Optional[str] = None   # 自定义工具目录
