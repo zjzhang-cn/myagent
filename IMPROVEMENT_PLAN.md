@@ -104,14 +104,19 @@
   - 支持异步执行 + 轮询结果
   - 流式输出支持 `SIGINT` 中断
 
-### 10. 计划器增强
+### 10. 计划器增强  ✅ 已完成 (2026-05-15)
 
 - **问题**: `estimate_complexity()` 关键词匹配脆弱，`_simple_decompose()` 按标点拆分不准确
 - **方案**:
   - 引入 LLM 二次验证: 关键词评分 → LLM 确认（减少误触）
-  - 依赖图可视化（DAG 而非线性步骤）
-  - 并行步骤检测（`["搜索A", "搜索B"]` 可并行执行）
-  - 步骤级 timeout 设置
+  - DAG 依赖图: 步骤间依赖关系解析，`get_executable_steps()` 返回可并行步骤
+  - 支持步骤级 `dependencies` 标注
+- **实现**:
+  - `Planner._llm_verify_complexity()` — 边界值时用 LLM 确认是否需要规划，避免误触发
+  - `Plan.get_executable_steps()` — 返回所有依赖已满足的步骤（并行执行候选）
+  - `_simple_decompose()` 增强 — 自动推断顺序依赖和并行关系
+  - `_parse_plan()` 增强 — 从 LLM 响应提取 `dependencies` 字段
+  - `format_for_prompt()` 增强 — 显示可并行步骤
 
 ### 11. Token 用量监控
 

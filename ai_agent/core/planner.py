@@ -3,13 +3,15 @@
 
 负责：
 1. 分析任务复杂度，决定是否需要规划
-2. 将复杂任务分解为可执行的步骤
+2. 将复杂任务分解为可执行的步骤（含依赖关系）
 3. 管理执行进度，支持动态重新规划
+4. 检测可并行执行的步骤
 """
 
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -87,6 +89,16 @@ class Plan:
                 return step
         return None
 
+    def get_executable_steps(self) -> list[PlanStep]:
+        """获取所有当前可执行的步骤（依赖已满足且未执行）"""
+        completed_ids = {
+            s.id for s in self.steps if s.status == StepStatus.COMPLETED
+        }
+        return [
+            s for s in self.steps
+            if s.status == StepStatus.PENDING and s.can_execute(completed_ids)
+        ]
+
     def mark_step(self, step_id: int, status: StepStatus, result: str = "") -> None:
         """标记步骤状态"""
         for step in self.steps:
@@ -107,13 +119,23 @@ class Plan:
                 StepStatus.SKIPPED: "⏭️",
             }.get(step.status, "❓")
 
-            lines.append(f"  {status_icon} Step {step.id}: {step.description}")
+            deps = ""
+            if step.dependencies:
+                deps = f" [依赖: {', '.join(f'Step {d}' for d in step.dependencies)}]"
+
+            lines.append(f"  {status_icon} Step {step.id}: {step.description}{deps}")
             if step.result:
                 lines.append(f"      结果: {step.result[:200]}")
 
-        next_step = self.get_next_step()
-        if next_step:
-            lines.append(f"\n当前应执行: Step {next_step.id} - {next_step.description}")
+        # 显示当前可并行执行的步骤
+        executable = self.get_executable_steps()
+        if len(executable) > 1:
+            lines.append(
+                f"\n⚡ 当前可并行执行 ({len(executable)} 步): "
+                + ", ".join(f"Step {s.id} ({s.description})" for s in executable)
+            )
+        elif executable:
+            lines.append(f"\n当前应执行: Step {executable[0].id} - {executable[0].description}")
 
         return "\n".join(lines)
 
@@ -143,18 +165,34 @@ class Plan:
                 dependencies=s.get("dependencies", []),
                 tool_hint=s.get("tool_hint", ""),
             ))
-        plan = Plan(
+        return Plan(
             task=data.get("task", ""),
             steps=steps,
             created_at=data.get("created_at", ""),
             current_step_index=data.get("current_step_index", 0),
         )
-        return plan
 
 
 # ============================================================
 # 任务复杂度分析
 # ============================================================
+
+# 连接词：表示多步任务
+_MULTI_TASK_KEYWORDS = [
+    "然后", "接着", "之后", "再", "并且", "同时", "另外",
+    "第一步", "第二步", "首先", "其次", "最后", "最终",
+]
+
+# 复杂操作关键词
+_COMPLEX_KEYWORDS = [
+    "分析", "比较", "总结", "整理", "生成报告", "搜索并",
+    "查找并", "下载", "安装", "配置", "部署", "调试",
+    "写代码", "创建项目", "重构",
+]
+
+# 并行关键词（表示无依赖的并行步骤）
+_PARALLEL_KEYWORDS = ["同时", "并且", "另外", "与此同时", "此外"]
+
 
 def estimate_complexity(user_input: str) -> int:
     """
@@ -174,25 +212,59 @@ def estimate_complexity(user_input: str) -> int:
         score += 1
 
     # 多任务关键词
-    multi_task_keywords = [
-        "然后", "接着", "之后", "再", "并且", "同时", "另外",
-        "第一步", "第二步", "首先", "其次", "最后", "最终",
-    ]
-    score += sum(1 for kw in multi_task_keywords if kw in text)
+    score += sum(1 for kw in _MULTI_TASK_KEYWORDS if kw in text)
 
     # 复杂操作关键词
-    complex_keywords = [
-        "分析", "比较", "总结", "整理", "生成报告", "搜索并",
-        "查找并", "下载", "安装", "配置", "部署", "调试",
-        "写代码", "创建项目", "重构",
-    ]
-    score += sum(1 for kw in complex_keywords if kw in text)
+    score += sum(1 for kw in _COMPLEX_KEYWORDS if kw in text)
 
     # 文件批量操作
     if re.search(r'(所有|批量|每个|全部).*文件', text):
         score += 2
 
+    # URL + 操作模式（如"抓取"、"下载"）
+    if re.search(r'https?://', text):
+        score += 1
+
     return min(score, 10)
+
+
+def _infer_dependencies(parts: list[str]) -> list[list[int]]:
+    """根据步骤描述推断依赖关系。
+
+    Args:
+        parts: 各步骤的描述文本列表
+
+    Returns:
+        dependencies 列表，deps[i] = step i+1 依赖的 step id 列表
+    """
+    n = len(parts)
+    if n <= 1:
+        return [[]]
+
+    deps: list[list[int]] = [[] for _ in range(n)]
+
+    # 默认依赖：按照顺序，每个步骤依赖前一步（除非是并行步骤）
+    # 并行步骤：当前步骤和上一步之间用"同时"、"另外"等连接
+    for i in range(1, n):
+        prev = parts[i - 1]
+        curr = parts[i]
+        # 检查当前步骤是否与上一步是并行关系
+        is_parallel = any(kw in curr[:10] for kw in _PARALLEL_KEYWORDS)
+        if not is_parallel:
+            deps[i].append(i)  # 依赖前一步（Step id = i）
+
+    return deps
+
+
+def _split_task(task: str) -> list[str]:
+    """将任务文本拆分为多个步骤描述。
+
+    按分隔符拆分，同时保留连接词作为步骤前缀以便后续推断依赖。
+    """
+    # 按分隔符拆分，保留连接词
+    parts = re.split(r'[，。,\.;；\n]+', task)
+    parts = [p.strip() for p in parts if p.strip() and len(p.strip()) > 2]
+    return parts
 
 
 # ============================================================
@@ -201,6 +273,17 @@ def estimate_complexity(user_input: str) -> int:
 
 class Planner:
     """任务规划器"""
+
+    # LLM 二次验证的 prompt
+    _VERIFY_COMPLEXITY_PROMPT = (
+        '你是一个任务复杂度判断专家。用户的请求是一个多步骤任务，需要规划执行？\n'
+        '如果请求满足以下任意条件请回答"是"，否则回答"否"：\n'
+        "1. 需要调用多个不同的工具才能完成\n"
+        "2. 需要按照先后顺序执行多个步骤\n"
+        "3. 涉及搜索信息、处理结果、保存输出等多个阶段\n"
+        "4. 需要批量处理多个文件或数据\n\n"
+        '请只回答"是"或"否"。'
+    )
 
     def __init__(
         self,
@@ -216,27 +299,80 @@ class Planner:
         self._tools_desc = tools_description
 
     def should_plan(self, user_input: str, threshold: int = 3) -> bool:
-        """判断是否需要启动规划"""
+        """判断是否需要启动规划
+
+        两步策略：
+        1. 关键词启发式评分
+        2. 边界值时用 LLM 二次验证（减少误触）
+        """
         complexity = estimate_complexity(user_input)
         logger.info(f"任务复杂度评估: {complexity} (阈值: {threshold})")
-        return complexity >= threshold
+
+        if complexity >= threshold + 2:
+            # 远超过阈值，直接启动规划
+            return True
+
+        if complexity >= threshold - 1:
+            # 边界值（threshold-1 到 threshold+1），LLM 二次验证
+            logger.info("复杂度处于边界，启动 LLM 二次验证...")
+            return self._llm_verify_complexity(user_input)
+
+        return False
+
+    def _llm_verify_complexity(self, user_input: str) -> bool:
+        """用 LLM 判断任务是否复杂到需要规划"""
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": self._VERIFY_COMPLEXITY_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": f"请判断以下请求是否需要规划：\n{user_input}",
+                },
+            ]
+            response = self._chat(messages)
+
+            # 判断 LLM 是否认为需要规划
+            positive = False
+            for word in ["是", "yes", "true", "需要", "复杂"]:
+                if word in response.lower():
+                    positive = True
+                    break
+            # "否" 比 "是" 优先级高
+            for word in ["否", "no", "不需要", "简单"]:
+                if word in response.lower():
+                    positive = False
+                    break
+
+            logger.info(f"LLM 二次验证结果: {'需要规划' if positive else '不需要规划'} ({response[:100]})")
+            return positive
+        except Exception as e:
+            logger.warning(f"LLM 二次验证失败: {e}，回退到关键词判断")
+            return estimate_complexity(user_input) >= 4
 
     def create_plan(self, task: str) -> Plan:
-        """使用 LLM 将任务分解为执行步骤"""
+        """使用 LLM 将任务分解为执行步骤（含依赖关系）"""
         messages = [
             {
                 "role": "system",
                 "content": (
                     "你是一个任务规划专家。请将用户的请求分解为具体的执行步骤。\n"
                     f"可用工具：{self._tools_desc}\n\n"
-                    "请输出 JSON 格式的计划，每个步骤包含 id, description, tool_hint 字段。\n"
-                    '格式：{"steps": [{"id": 1, "description": "...", "tool_hint": "tool_name"}, ...]}\n'
+                    "请输出 JSON 格式的计划，每个步骤包含以下字段：\n"
+                    "- id: 步骤编号（从1开始）\n"
+                    "- description: 步骤描述\n"
+                    "- tool_hint: 建议使用的工具名（可选）\n"
+                    '- dependencies: 依赖的步骤 id 列表（如 [1] 表示依赖第1步完成，[] 表示无依赖）\n\n'
+                    '格式：{"steps": [{"id": 1, "description": "...", "tool_hint": "tool_name", "dependencies": []}, ...]}\n'
                     "要求：\n"
                     "1. 步骤应该具体、可执行，每个步骤完成一件事\n"
                     "2. 步骤总数不超过 10 个\n"
-                    "3. tool_hint 是可选的，如果该步骤明显需要某个工具则给出提示\n"
-                    "4. 步骤之间应保持逻辑顺序\n"
-                    "5. 仅输出 JSON，不要有其他内容"
+                    "3. tool_hint 是可选的，仅当明显需要特定工具时给出\n"
+                    "4. dependencies 是关键：明确标注每个步骤的依赖关系\n"
+                    "5. 互不依赖的步骤可以标记为空依赖 []，表示可以并行执行\n"
+                    "6. 仅输出 JSON，不要有其他内容"
                 ),
             },
             {"role": "user", "content": f"请为以下任务制定执行计划：\n{task}"},
@@ -258,13 +394,16 @@ class Planner:
                 data = json.loads(json_match.group())
                 steps = []
                 for i, s in enumerate(data.get("steps", [])):
+                    deps = s.get("dependencies", [])
+                    if not isinstance(deps, list):
+                        deps = []
                     steps.append(PlanStep(
                         id=s.get("id", i + 1),
                         description=s.get("description", str(s)),
                         tool_hint=s.get("tool_hint", ""),
+                        dependencies=deps,
                     ))
                 if steps:
-                    import time
                     return Plan(
                         task=task,
                         steps=steps,
@@ -276,32 +415,38 @@ class Planner:
         return self._simple_decompose(task)
 
     def _simple_decompose(self, task: str) -> Plan:
-        """简单关键词分解（不依赖 LLM）"""
-        steps = []
-        step_id = 1
+        """增强的关键词分解（不依赖 LLM）
 
-        # 根据分隔符和连接词拆分
-        parts = re.split(r'[，。,\.;；\n]|然后|接着|之后|再|并且|同时', task)
-        parts = [p.strip() for p in parts if p.strip()]
+        改进：
+        - 更精确的步骤拆分
+        - 自动推断依赖关系
+        - 检测并行步骤
+        """
+        parts = _split_task(task)
 
         if len(parts) <= 1:
             # 单步任务
+            return Plan(
+                task=task,
+                steps=[PlanStep(id=1, description=task, tool_hint="")],
+                created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+
+        # 多步任务：创建步骤并推断依赖
+        steps = []
+        for i, part in enumerate(parts):
             steps.append(PlanStep(
-                id=1,
-                description=task,
+                id=i + 1,
+                description=part,
                 tool_hint="",
             ))
-        else:
-            for i, part in enumerate(parts):
-                if len(part) > 2:  # 跳过太短的片段
-                    steps.append(PlanStep(
-                        id=step_id,
-                        description=part,
-                        tool_hint="",
-                    ))
-                    step_id += 1
 
-        import time
+        # 推断依赖关系
+        deps = _infer_dependencies(parts)
+        for i, dep_list in enumerate(deps):
+            if dep_list:
+                steps[i].dependencies = dep_list
+
         return Plan(
             task=task,
             steps=steps,

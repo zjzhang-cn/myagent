@@ -527,10 +527,16 @@ class Agent:
                         self._emit("done", {"answer": final_answer})
                         break
 
+                    executable = self.current_plan.get_executable_steps()
+                    if len(executable) > 1:
+                        step_hint = "、".join(f"Step {s.id} ({s.description})" for s in executable)
+                    else:
+                        step_hint = (executable[0] if executable else next_step).description
+
                     hint = (
                         f"⚠️ 计划尚未完成！你必须继续执行。\n"
                         f"进度：{self.current_plan.completed_steps}/{self.current_plan.total_steps}\n"
-                        f"立即执行：{next_step.description}\n"
+                        f"立即执行：{step_hint}\n"
                         f"请只输出工具调用 JSON：\n"
                         f'{{"tool_call": {{"name": "工具名", "arguments": {{"参数": "值"}}}}}}'
                     )
@@ -954,12 +960,22 @@ class Agent:
         if self.current_plan:
             plan_text = self.current_plan.format_for_prompt()
             system_parts.append(f"\n## 当前任务计划\n{plan_text}")
-            next_step = self.current_plan.get_next_step()
-            if next_step:
-                system_parts.append(
-                    f"\n**⚠️ 你正在执行计划，现在必须完成 Step {next_step.id}: "
-                    f"{next_step.description}**"
-                )
+            executable = self.current_plan.get_executable_steps()
+            if executable:
+                if len(executable) == 1:
+                    system_parts.append(
+                        f"\n**⚠️ 你正在执行计划，现在必须完成 Step {executable[0].id}: "
+                        f"{executable[0].description}**"
+                    )
+                else:
+                    # 多个可并行执行的步骤
+                    descs = "、".join(
+                        f"Step {s.id} ({s.description})" for s in executable
+                    )
+                    system_parts.append(
+                        f"\n**⚡ 当前有 {len(executable)} 个步骤可以并行执行: {descs}**\n"
+                        "你可以一次调用多个互不依赖的工具来加速执行。"
+                    )
             system_parts.append(
                 "\n**你必须通过调用工具来完成计划中的每一步。不要跳过步骤，不要直接回复文本。**"
             )
