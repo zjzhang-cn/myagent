@@ -1,84 +1,84 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文档为 Claude Code (claude.ai/code) 在此仓库中工作时提供指导。
 
-## Commands
+## 常用命令
 
 ```bash
-# Install dependencies
+# 安装依赖
 uv sync
 
-# Run interactive agent mode
+# 交互式 Agent 模式
 uv run ai-agent
 uv run python -m ai_agent.main
 
-# Single query mode
-uv run python -m ai_agent.main "your query"
+# 单次查询模式
+uv run python -m ai_agent.main "你的问题"
 
-# Use OpenAI provider instead of Ollama
-uv run python -m ai_agent.main --provider openai --model gpt-4o "query"
+# 使用 OpenAI 提供商替代 Ollama
+uv run python -m ai_agent.main --provider openai --model gpt-4o "问题"
 
-# List available models
+# 列出可用模型
 uv run python -m ai_agent.main --list-models
 
-# Enable thinking tokens display (for reasoning models)
+# 启用推理 token 显示（用于推理模型如 DeepSeek-R1）
 uv run python -m ai_agent.main --think --model deepseek-r1:7b
 
-# Log LLM interactions to file (generates .log and .jsonl)
-uv run python -m ai_agent.main --log-file agent.log "query"
+# 记录 LLM 交互日志（生成 .log 和 .jsonl 文件）
+uv run python -m ai_agent.main --log-file agent.log "问题"
 
-# Run example script (interactive menu)
+# 运行示例脚本（交互式菜单）
 uv run python ai_agent/example.py
 ```
 
-## Architecture
+## 架构
 
-### Core Loop (ReAct)
+### 核心循环（ReAct）
 
-The agent runs a **Think → Act → Observe → Reflect** loop in `core/agent.py`:
+Agent 在 `core/agent.py` 中运行 **思考(Think) → 行动(Act) → 观察(Observe) → 反思(Reflect)** 循环：
 
-1. **Think** - LLM evaluates the conversation + tool definitions, decides whether to call tools or respond
-2. **Act** - Execute tool calls (sequentially or via ThreadPoolExecutor for concurrent tools)
-3. **Observe** - Tool results are injected back into conversation history
-4. **Reflect** - LLM sees observations, checks if plan is done, may trigger replanning on failures
+1. **思考** — LLM 评估对话历史和工具定义，决定调用工具还是直接回复
+2. **行动** — 执行工具调用（顺序执行，或通过 ThreadPoolExecutor 并发执行独立工具）
+3. **观察** — 工具执行结果注入回对话历史
+4. **反思** — LLM 查看观察结果，检查计划是否完成，失败时触发重新规划
 
-Before the loop starts, an optional **Planner** (`core/planner.py`) estimates task complexity (1-10 heuristic) and can decompose complex tasks into dependent steps.
+循环开始前，可选的 **规划器** (`core/planner.py`) 通过启发式算法评估任务复杂度（1-10），将复杂任务分解为有依赖关系的步骤。
 
-### Module Structure
+### 模块结构
 
 ```
 ai_agent/
-├── __init__.py          # Public API exports
-├── config.py            # AgentConfig dataclass (all knobs)
-├── main.py              # CLI entry point (argparse + interactive shell)
-├── example.py           # Usage demos
+├── __init__.py          # 公共 API 导出
+├── config.py            # AgentConfig 数据类（所有配置项）
+├── main.py              # CLI 入口（argparse + 交互式 Shell）
+├── example.py           # 使用示例
 ├── core/
-│   ├── agent.py         # Main Agent: ReAct loop, context trimming, parallel tool exec, error recovery
-│   ├── memory.py        # ShortTermMemory (sliding window), WorkingMemory (task state), LongTermMemory (SQLite)
-│   └── planner.py       # Complexity estimation, Plan/PlanStep, LLM-based planning & replanning
+│   ├── agent.py         # Agent 主类：ReAct 循环、上下文裁剪、并发执行、错误恢复
+│   ├── memory.py        # 短期记忆（滑动窗口）、工作记忆（任务状态）、长期记忆（SQLite）
+│   └── planner.py       # 复杂度评估、Plan/PlanStep、LLM 规划与重新规划
 ├── llm/
-│   ├── base.py          # BaseLLM ABC, LLMResponse, StreamEvent
-│   ├── ollama.py        # Ollama integration (native API + OpenAI-compat dual mode, streaming, think support)
-│   └── openai.py        # OpenAI SDK integration w/ auto base URL inference, streaming, reasoning_content support
+│   ├── base.py          # BaseLLM 抽象基类、LLMResponse、StreamEvent
+│   ├── ollama.py        # Ollama 集成（原生 API + OpenAI 兼容双模式、流式、think 支持）
+│   └── openai.py        # OpenAI SDK 集成（自动推断 Base URL、流式、reasoning_content 支持）
 ├── tools/
-│   ├── base.py          # ToolDefinition, ToolParameter, @tool decorator
-│   ├── registry.py      # ToolRegistry (register, lookup, execute, schema generation)
-│   └── builtin/         # Sandbox-guarded built-in tools
-│       ├── file_ops.py  # read/write/list/delete file
-│       ├── shell.py     # run_shell_command
-│       └── web_search.py # search_web + fetch_url (DuckDuckGo + requests/bs4)
+│   ├── base.py          # ToolDefinition、ToolParameter、@tool 装饰器
+│   ├── registry.py      # ToolRegistry（注册、查询、执行、Schema 生成）
+│   └── builtin/         # 受安全沙箱保护的内置工具
+│       ├── file_ops.py  # 读/写/列表/删除文件
+│       ├── shell.py     # 执行 Shell 命令
+│       └── web_search.py # 搜索网页 + 抓取 URL（DuckDuckGo + requests/bs4）
 └── utils/
-    ├── security.py      # Path sandbox (symlink traversal prevention + directory jail), shell command allowlist
-    └── token_utils.py   # CJK-aware token estimation for context window management
+    ├── security.py      # 路径沙箱（符号链接遍历防御 + 目录隔离）、Shell 命令白名单
+    └── token_utils.py   # CJK 感知的 Token 估算，用于上下文窗口管理
 ```
 
-### Key Design Decisions
+### 关键设计决策
 
-- **Two LLM backends**: OllamaLLM (local, supports both native Ollama API and OpenAI-compat mode) and OpenAILLM (OpenAI SDK for any OpenAI-compatible API including DeepSeek, Moonshot, etc.). The OpenAILLM infers base URL from model name patterns.
-- **Tool calling**: Supports LLM-native function calling AND regex-based parsing of JSON / Chinese function-call style text. The `ToolCallParser` in `core/agent.py` handles three fallback strategies.
-- **Security layer**: Thread-local `SecurityContext` set before each tool execution. `sandbox_path()` does two-phase path validation (normalized check + realpath symlink check). `validate_shell_command()` uses an allowlist + dangerous-pattern regex blocking. All built-in tools route through `check_path()` / `check_command()`.
-- **Memory**: Three-tier — ShortTermMemory (sliding window of messages with OpenAI-compat tool_calls/reasoning_content fields), WorkingMemory (in-memory key-value store + step results), LongTermMemory (SQLite with keyword search and importance ranking).
-- **Context management**: CJK-character-aware token estimation (no tiktoken dependency). `_trim_messages()` first truncates tool results, then drops old messages while preserving the first user message.
-- **Error recovery**: `_categorize_error()` classifies tool failures into categories (tool_not_found, timeout, permission, etc.). Failed steps trigger `Planner.replan()` up to `max_replan_attempts`.
-- **Streaming**: `on_token` and `on_thinking` callbacks for real-time token display. When `on_token` is set, `_call_llm()` automatically switches to `chat_stream()`.
-- **Planning**: `estimate_complexity()` uses keyword heuristics (multi-task connectors, complex operation verbs, length). When complexity >= `plan_threshold_complexity`, `Planner.create_plan()` asks LLM to decompose. Falls back to simple text splitting on LLM failure.
+- **双 LLM 后端**：OllamaLLM（本地模型，支持原生 Ollama API 和 OpenAI 兼容两种模式）和 OpenAILLM（OpenAI SDK，兼容 DeepSeek、Moonshot 等任何 OpenAI 兼容 API，根据模型名自动推断 Base URL）
+- **工具调用**：同时支持 LLM 原生 Function Calling 和基于正则的 JSON / 中文函数调用风格文本解析。`core/agent.py` 中的 `ToolCallParser` 包含三级回退策略
+- **安全层**：线程本地的 `SecurityContext`，每次工具执行前设置。`sandbox_path()` 做两阶段路径验证（规范化检查 + realpath 符号链接检查）。`validate_shell_command()` 使用白名单 + 危险模式正则拦截。所有内置工具通过 `check_path()` / `check_command()` 路由
+- **三层记忆**：短期记忆（滑动窗口消息队列，支持 OpenAI 兼容的 tool_calls/reasoning_content 字段）、工作记忆（内存键值存储 + 步骤结果）、长期记忆（SQLite，关键词搜索 + 重要度排序）
+- **上下文管理**：CJK 感知的 Token 估算（不依赖 tiktoken）。`_trim_messages()` 先截断工具结果，再丢弃早期消息，同时保留第一条用户消息
+- **错误恢复**：`_categorize_error()` 将工具失败分类（tool_not_found、timeout、permission 等）。失败步骤触发 `Planner.replan()`，最多重试 `max_replan_attempts` 次
+- **流式输出**：`on_token` 和 `on_thinking` 回调实现实时 Token 显示。设置 `on_token` 后 `_call_llm()` 自动切换为 `chat_stream()` 流式模式
+- **任务规划**：`estimate_complexity()` 使用关键词启发式（多任务连接词、复杂操作动词、长度）。复杂度 >= `plan_threshold_complexity` 时 `Planner.create_plan()` 请求 LLM 分解任务，LLM 失败时降级为简单文本拆分
