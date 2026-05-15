@@ -313,9 +313,6 @@ def list_models(api_key: str | None = None,
 
 
 def main():
-    # 从 .env 文件加载环境变量（如果存在）
-    load_dotenv()
-
     parser = argparse.ArgumentParser(
         description="AI Agent - 基于 OpenAI API 的工具调用型智能 Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -381,6 +378,12 @@ def main():
         help="禁用模型推理",
     )
     parser.add_argument(
+        "--env-file",
+        default=None,
+        metavar="PATH",
+        help="环境文件路径（默认自动查找项目根目录的 .env 文件）",
+    )
+    parser.add_argument(
         "--log-file",
         default=None,
         metavar="PATH",
@@ -388,6 +391,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # 加载环境文件（指定路径 > 项目根目录 .env > 不加载）
+    if args.env_file:
+        load_dotenv(args.env_file)
+    else:
+        load_dotenv()
 
     # 命令行参数的默认值从 env var / .env 中读取（滞后解析，确保 load_dotenv 已执行）
     if args.model is None:
