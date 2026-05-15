@@ -240,7 +240,7 @@ def interactive_mode(agent: Agent) -> None:
     print(f"🤖 AI Agent (模型: {agent.llm.model_name})")
     print(f"📦 可用工具: {len(agent.tool_registry.list_tools())} 个")
     print(f"🧠 规划: {'启用' if agent.config.enable_planning else '关闭'}")
-    print("输入 'quit' 或 'exit' 退出, 'reset' 重置, 'tools' 查看工具")
+    print("命令: /quit 退出  /reset 重置  /tools 工具列表  /memory 记忆管理")
     print("=" * 60 + "\n")
 
     while True:
@@ -253,16 +253,23 @@ def interactive_mode(agent: Agent) -> None:
         if not user_input:
             continue
 
-        if user_input.lower() in ("quit", "exit", "q"):
+        # 以 / 开头的输入视为命令
+        if user_input.startswith("/"):
+            user_input = user_input[1:]
+
+        lowered = user_input.lower()
+
+        if lowered in ("quit", "exit", "q"):
             print("再见！")
             break
 
-        if user_input.lower() == "reset":
+        if lowered in ("reset", "clear"):
             agent.reset()
             print("✅ Agent 已重置")
             continue
 
-        if user_input.lower() == "tools":
+        if lowered in ("tools", "help"):
+            print("\n可用工具：")
             print("\n可用工具：")
             for td in agent.tool_registry.list_definitions():
                 params = ", ".join(p.name for p in td.parameters)
@@ -270,13 +277,151 @@ def interactive_mode(agent: Agent) -> None:
             print()
             continue
 
-        if user_input.lower() == "memory":
-            stats = agent.long_term.stats()
-            print(f"\n长期记忆统计: 共 {stats['total']} 条")
-            entries = agent.long_term.list_all(limit=5)
-            for e in entries:
-                print(f"  [{e.category}] {e.content[:100]}")
-            print()
+        if lowered.startswith("memory"):
+            parts = user_input.split(maxsplit=2)
+            cmd = parts[1] if len(parts) > 1 else "overview"
+
+            if cmd == "stats" or cmd == "bycat":
+                stats = agent.long_term.stats()
+                print(f"\n长期记忆统计: 共 {stats['total']} 条")
+                for cat, count in stats.get("by_category", {}).items():
+                    print(f"  [{cat}] {count} 条")
+
+                if cmd == "bycat" and stats["total"] > 0:
+                    print()
+                    for cat, count in stats.get("by_category", {}).items():
+                        entries = agent.long_term.list_all(category=cat, limit=10)
+                        print(f"  [{cat}] ({count} 条):")
+                        for e in entries:
+                            created = e.created_at[:10] if len(e.created_at) > 10 else e.created_at
+                            print(f"    [#{e.id}] ★{e.importance}  {created}")
+                            short = e.content[:80].replace("\n", " ")
+                            print(f"          {short}")
+                        if count > 10:
+                            print(f"          ... 还有 {count - 10} 条")
+                        print()
+                print()
+
+            elif cmd == "list":
+                limit = int(parts[2]) if len(parts) > 2 else 20
+                entries = agent.long_term.list_all(limit=limit)
+                if not entries:
+                    print("\n暂无记忆。\n")
+                else:
+                    print(f"\n长期记忆 (最近 {len(entries)} 条):")
+                    print("-" * 60)
+                    for e in entries:
+                        created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
+                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"        {created}")
+                        print(f"        {e.content[:200]}")
+                        print()
+                print()
+
+            elif cmd == "search" and len(parts) > 2:
+                query = parts[2]
+                entries = agent.long_term.search(query=query, limit=20)
+                if not entries:
+                    print(f"\n未找到包含 \"{query}\" 的记忆。\n")
+                else:
+                    print(f"\n搜索 \"{query}\" (找到 {len(entries)} 条):")
+                    print("-" * 60)
+                    for e in entries:
+                        created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
+                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"        {created}")
+                        print(f"        {e.content[:200]}")
+                        print()
+                print()
+
+            elif cmd == "cat" and len(parts) > 2:
+                category = parts[2]
+                entries = agent.long_term.list_all(category=category, limit=50)
+                if not entries:
+                    print(f"\n分类 \"{category}\" 下暂无记忆。\n")
+                else:
+                    print(f"\n分类 [{category}] ({len(entries)} 条):")
+                    print("-" * 60)
+                    for e in entries:
+                        created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
+                        print(f"  [#{e.id}] ★{e.importance}  {created}")
+                        print(f"        {e.content[:200]}")
+                        print()
+                print()
+
+            elif cmd == "show" and len(parts) > 2:
+                try:
+                    mem_id = int(parts[2])
+                    entry = agent.long_term.get(mem_id)
+                    if entry:
+                        print(f"\n[#{entry.id}] {entry.category}  ★重要度 {entry.importance}")
+                        print(f"  创建: {entry.created_at}")
+                        print(f"  更新: {entry.updated_at}")
+                        print(f"  内容: {entry.content}")
+                    else:
+                        print(f"\n未找到编号为 {mem_id} 的记忆。\n")
+                except ValueError:
+                    print(f"\n无效的编号: {parts[2]}\n")
+                print()
+
+            elif cmd == "delete" and len(parts) > 2:
+                try:
+                    mem_id = int(parts[2])
+                    entry = agent.long_term.get(mem_id)
+                    if entry:
+                        agent.long_term.delete(mem_id)
+                        print(f"\n✅ 已删除记忆 #{mem_id}: {entry.content[:80]}...\n")
+                    else:
+                        print(f"\n未找到编号为 {mem_id} 的记忆。\n")
+                except ValueError:
+                    print(f"\n无效的编号: {parts[2]}\n")
+                print()
+
+            elif cmd == "forget" and len(parts) > 2:
+                query = parts[2]
+                count = agent.long_term.forget(query)
+                if count > 0:
+                    print(f"\n✅ 已遗忘 {count} 条包含 \"{query}\" 的记忆\n")
+                else:
+                    print(f"\n未找到包含 \"{query}\" 的记忆\n")
+                print()
+
+            elif cmd == "add" and len(parts) > 2:
+                content = parts[2]
+                import_cat = parts[3] if len(parts) > 3 else "note"
+                agent.long_term.add(content=content, category=import_cat)
+                print(f"\n✅ 已添加记忆 [{import_cat}]: {content[:80]}...\n")
+                print()
+
+            elif cmd == "help":
+                print("""
+记忆管理命令:
+  memory                 查看概览（统计 + 最近 10 条）
+  memory stats           查看统计
+  memory list [n]        列出最近 n 条
+  memory search <关键词>  搜索记忆
+  memory cat <分类>       按分类筛选
+  memory show <id>       查看单条完整内容
+  memory delete <id>     删除指定编号的记忆
+  memory forget <关键词>  模糊搜索并删除
+  memory add <内容> [分类] 手动添加记忆
+                """)
+
+            else:
+                # 默认 overview：统计 + 最近 10 条
+                stats = agent.long_term.stats()
+                print(f"\n长期记忆统计: 共 {stats['total']} 条")
+                for cat, count in stats.get("by_category", {}).items():
+                    print(f"  [{cat}] {count} 条")
+                entries = agent.long_term.list_all(limit=10)
+                if entries:
+                    print(f"\n最近 {len(entries)} 条:")
+                    print("-" * 40)
+                    for e in entries:
+                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"    {e.content[:150]}")
+                        print()
+                print()
             continue
 
         # 执行（带流式思考过程显示）
