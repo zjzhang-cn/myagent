@@ -7,11 +7,15 @@ Agent 运行流程：
 3. 返回最终结果
 """
 
+import base64
+import copy
+import datetime
 import json
 import logging
 import os
 import re
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
@@ -259,6 +263,8 @@ class Agent:
         self.state = AgentState.IDLE
         self.current_plan: Plan | None = None
         self._replan_count: int = 0  # 当前任务中已重新规划次数
+        self._iteration_count: int = 0  # 当前 run 中的迭代计数
+        self._no_toolcall_streak: int = 0  # 连续无工具调用次数
         self.on_step = on_step
         self.on_token = on_token
         self.on_thinking = on_thinking
@@ -282,6 +288,7 @@ class Agent:
 
         # Step 0: 将用户输入加入短期记忆
         self._replan_count = 0  # 重置重新规划计数
+        self._iteration_count = 0  # 重置迭代计数
         self._no_toolcall_streak = 0  # 重置连续无工具调用计数
         self.short_term.add_user(user_input)
         self.state = AgentState.IDLE
@@ -314,6 +321,16 @@ class Agent:
         final_answer = ""
         for iteration in range(1, self.config.max_iterations + 1):
             logger.info(f"--- ReAct 循环 {iteration}/{self.config.max_iterations} ---")
+            self._iteration_count = iteration
+
+            # 自动快照：每 N 轮迭代保存一次状态
+            snap_interval = self.config.auto_snapshot_interval
+            if snap_interval > 0 and iteration % snap_interval == 0:
+                auto_name = f"_auto_{self.working.current_task[:20]}_{iteration}"
+                try:
+                    self.save_state(auto_name)
+                except Exception as e:
+                    logger.warning(f"自动快照失败: {e}")
 
             # 2a. 思考阶段
             self.state = AgentState.THINKING
@@ -668,6 +685,85 @@ class Agent:
     # 状态持久化管理
     # ----------------------------------------------------------
 
+    _STATE_SCHEMA_VERSION = 1  # 状态文件 schema 版本，用于兼容性检测
+
+    @staticmethod
+    def _compress_value(value: str, threshold: int = 500) -> str | dict:
+        """压缩过长的字符串值。超过阈值时用 zlib + base85 压缩。
+
+        返回值保留为一个 dict：{"__c": True, "d": "<compressed>", "r": <raw_len>}
+        加载时通过 _decompress_value 恢复。
+        """
+        if len(value) <= threshold:
+            return value
+        compressed = base64.b85encode(zlib.compress(value.encode("utf-8"))).decode("ascii")
+        return {"__c": True, "d": compressed, "r": len(value)}
+
+    @staticmethod
+    def _decompress_value(value: str | dict) -> str:
+        """从压缩状态恢复原始字符串。如果未压缩则原样返回。"""
+        if isinstance(value, dict) and value.get("__c"):
+            try:
+                raw = zlib.decompress(base64.b85decode(value["d"]))
+                return raw.decode("utf-8")
+            except Exception as e:
+                logger.warning(f"解压缩失败: {e}，返回原始值")
+                return str(value)
+        return str(value)
+
+    def _compress_state_data(self, data: dict, threshold: int = 0) -> dict:
+        """递归压缩状态数据中的长字符串。"""
+        if threshold <= 0:
+            return data
+        data = copy.deepcopy(data)
+
+        def _walk(obj):
+            if isinstance(obj, dict):
+                # 递归压缩 message content 和 metadata 中的字符串
+                if "content" in obj and isinstance(obj["content"], str):
+                    obj["content"] = self._compress_value(obj["content"], threshold)
+                if "metadata" in obj and isinstance(obj["metadata"], dict):
+                    # 压缩 tool_calls 中的 arguments
+                    calls = obj["metadata"].get("tool_calls", [])
+                    if isinstance(calls, list):
+                        for tc in calls:
+                            func = tc.get("function", {})
+                            if isinstance(func, dict) and isinstance(func.get("arguments"), str):
+                                func["arguments"] = self._compress_value(func["arguments"], threshold)
+                for k, v in list(obj.items()):
+                    if k in ("__c", "d", "r"):
+                        continue
+                    if isinstance(v, (dict, list)):
+                        obj[k] = _walk(v)
+            elif isinstance(obj, list):
+                obj[:] = [_walk(item) if isinstance(item, (dict, list)) else item for item in obj]
+            return obj
+
+        return _walk(data)
+
+    def _decompress_state_data(self, data: dict) -> dict:
+        """递归解压状态数据中的压缩字段。"""
+        data = copy.deepcopy(data)
+
+        def _walk(obj):
+            if isinstance(obj, dict):
+                # 检查是否为压缩值标记
+                if obj.get("__c"):
+                    return self._decompress_value(obj)
+                for k, v in list(obj.items()):
+                    if k in ("__c", "d", "r"):
+                        continue
+                    if isinstance(v, (dict, list)):
+                        obj[k] = _walk(v)
+                    elif isinstance(v, str):
+                        # 字符串本身可能是压缩值（content 字段）
+                        pass
+            elif isinstance(obj, list):
+                obj[:] = [_walk(item) if isinstance(item, (dict, list)) else item for item in obj]
+            return obj
+
+        return _walk(data)
+
     def _get_state_dir(self) -> str:
         """获取状态存储目录路径，确保目录存在"""
         state_dir = os.path.expanduser(self.config.state_dir)
@@ -683,12 +779,11 @@ class Agent:
         Returns:
             状态文件的绝对路径
         """
-        import datetime
-
         # 确保 _no_toolcall_streak 存在
         no_toolcall_streak = getattr(self, '_no_toolcall_streak', 0)
 
-        state_data = {
+        state_data: dict = {
+            "schema_version": self._STATE_SCHEMA_VERSION,
             "name": name,
             "saved_at": datetime.datetime.now().isoformat(),
             "meta": {
@@ -696,11 +791,17 @@ class Agent:
                 "agent_state": self.state.value if isinstance(self.state, AgentState) else str(self.state),
                 "replan_count": self._replan_count,
                 "no_toolcall_streak": no_toolcall_streak,
+                "iteration_count": self._iteration_count,
             },
             "short_term_memory": self.short_term.to_serializable(),
             "working_memory": self.working.to_serializable(),
             "plan": self.current_plan.to_dict() if self.current_plan else None,
         }
+
+        # 压缩大字段
+        threshold = self.config.state_compress_threshold
+        if threshold > 0:
+            state_data = self._compress_state_data(state_data, threshold)
 
         state_dir = self._get_state_dir()
         safe_name = re.sub(r'[^\w\-]', '_', name)
@@ -709,7 +810,7 @@ class Agent:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(state_data, f, ensure_ascii=False, indent=2, default=str)
 
-        logger.info(f"状态已保存: {filepath}")
+        logger.info(f"状态已保存: {filepath} ({os.path.getsize(filepath)} 字节)")
         return filepath
 
     def load_state(self, name: str) -> bool:
@@ -736,6 +837,22 @@ class Agent:
             logger.error(f"读取状态文件失败: {e}")
             return False
 
+        # Schema 版本检测
+        file_version = state_data.get("schema_version", 0)
+        if file_version > self._STATE_SCHEMA_VERSION:
+            logger.warning(
+                f"状态文件版本 ({file_version}) 高于当前支持版本 "
+                f"({self._STATE_SCHEMA_VERSION})，可能不兼容"
+            )
+        elif file_version < self._STATE_SCHEMA_VERSION:
+            logger.info(
+                f"状态文件版本 ({file_version}) 低于当前版本 "
+                f"({self._STATE_SCHEMA_VERSION})，尝试兼容加载"
+            )
+
+        # 解压压缩字段
+        state_data = self._decompress_state_data(state_data)
+
         # 恢复短期记忆
         if "short_term_memory" in state_data:
             from ai_agent.core.memory import ShortTermMemory
@@ -757,6 +874,7 @@ class Agent:
         meta = state_data.get("meta", {})
         self._replan_count = meta.get("replan_count", 0)
         self._no_toolcall_streak = meta.get("no_toolcall_streak", 0)
+        self._iteration_count = meta.get("iteration_count", 0)
 
         agent_state_str = meta.get("agent_state", "idle")
         try:
@@ -785,11 +903,14 @@ class Agent:
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                is_auto = str(data.get("name", "")).startswith("_auto_")
                 states.append({
                     "name": data.get("name", fname[:-5]),
                     "saved_at": data.get("saved_at", ""),
                     "model": data.get("meta", {}).get("model", ""),
                     "agent_state": data.get("meta", {}).get("agent_state", ""),
+                    "auto_snapshot": is_auto,
+                    "schema_version": data.get("schema_version", 0),
                 })
             except (json.JSONDecodeError, OSError):
                 continue
@@ -885,6 +1006,48 @@ class Agent:
 
         return messages
 
+    @staticmethod
+    def _partition_groups(messages: list[dict]) -> list[list[dict]]:
+        """将消息列表划分为原子组，保证 OpenAI API 兼容性。
+
+        原子组定义：
+        - user 消息自成一组
+        - assistant(plain) 自成一组
+        - assistant(tool_calls) + 其后响应它的所有 tool 消息属于同一组
+
+        同一组内的消息不会被打散丢弃，确保
+        assistant(tool_calls) 和 tool 始终成对出现。
+        """
+        groups: list[list[dict]] = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            role = msg.get("role", "")
+
+            if role == "tool":
+                # tool 消息必须归属于前一组（assistant tool_calls）
+                if groups:
+                    groups[-1].append(msg)
+                else:
+                    groups.append([msg])
+                i += 1
+
+            elif role == "assistant" and msg.get("tool_calls"):
+                # assistant(tool_calls) + 后续所有 tool 回复 → 原子组
+                group = [msg]
+                i += 1
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    group.append(messages[i])
+                    i += 1
+                groups.append(group)
+
+            else:
+                # user / assistant(plain) / system → 各自成组
+                groups.append([msg])
+                i += 1
+
+        return groups
+
     def _trim_messages(self, messages: list[dict]) -> list[dict]:
         """
         裁剪消息列表以适应上下文窗口。
@@ -892,8 +1055,10 @@ class Agent:
         策略：
         1. 始终保留 system prompt（第一条消息）
         2. 截断过长的工具结果
-        3. 如果仍超出预算，从旧到新移除消息，但保留第一条用户消息
-        4. 日志记录裁剪操作
+        3. 将消息划分为原子组，按组从旧到新丢弃
+           原子组：user | assistant(plain) | assistant(tool_calls) + tool*
+        4. 始终保留最后 1 组 + 第一条用户消息所在的组
+        5. 日志记录裁剪操作
         """
         budget = self.config.max_context_tokens
         total = estimate_messages_tokens(messages)
@@ -901,10 +1066,10 @@ class Agent:
         if total <= budget:
             return messages
 
-        logger.warning(f"⚠️ 上下文超出预算 ({total}/{budget} tokens)，开始裁剪...")
+        logger.warning(f"上下文超出预算 ({total}/{budget} tokens)，开始裁剪...")
         original_count = len(messages)
 
-        # 预留给 LLM 响应的空间（保守估计 30%）
+        # 预留给 LLM 响应的空间
         effective_budget = int(budget * 0.7)
 
         system_msg = messages[0]
@@ -914,16 +1079,13 @@ class Agent:
             logger.warning("仅剩系统消息，无法进一步裁剪")
             return messages
 
-        # Step 1: 截断过长的工具结果（保留 tool_call_id 等关键字段）
+        # Step 1: 截断过长的工具结果（深拷贝避免修改原始消息）
+        body = copy.deepcopy(body)
         max_tool_chars = self.config.max_tool_result_chars
         truncated_count = 0
-        for i, msg in enumerate(body):
+        for msg in body:
             if msg.get("role") == "tool" and len(msg.get("content", "")) > max_tool_chars:
-                body[i] = {
-                    "role": "tool",
-                    "content": truncate_text(msg["content"], max_tool_chars),
-                    "tool_call_id": msg.get("tool_call_id", ""),
-                }
+                msg["content"] = truncate_text(msg["content"], max_tool_chars)
                 truncated_count += 1
 
         if truncated_count:
@@ -935,71 +1097,66 @@ class Agent:
                 )
                 return [system_msg] + body
 
-        # Step 2: 从旧到新裁剪消息（保留第一条用户消息）
-        # 找到第一条用户消息的位置
-        first_user_idx = None
-        for i, msg in enumerate(body):
-            if msg.get("role") == "user":
-                first_user_idx = i
+        # Step 2: 按原子组分批，从旧到新丢弃整组
+        groups = self._partition_groups(body)
+        group_tokens = [estimate_messages_tokens(g) for g in groups]
+
+        # 找到第一条用户消息所在的组
+        first_user_group_idx = None
+        first_user_content: str | None = None
+        for gi, group in enumerate(groups):
+            for msg in group:
+                if msg.get("role") == "user":
+                    first_user_group_idx = gi
+                    first_user_content = msg.get("content", "")
+                    break
+            if first_user_group_idx is not None:
                 break
 
-        # 从最新的消息开始，向前收集直到预算允许
-        kept_body = []
+        # 从最新组开始向前收集，直到预算允许
+        kept_groups: list[list[dict]] = []
         current_tokens = estimate_message_tokens(system_msg)
 
-        # 始终保留第一条用户消息（如果存在）
-        first_user_msg = None
-        if first_user_idx is not None:
-            first_user_msg = body[first_user_idx]
-            current_tokens += estimate_message_tokens(first_user_msg)
+        for gi in range(len(groups) - 1, -1, -1):
+            gt = group_tokens[gi]
 
-        # 从后往前收集消息
-        for i in range(len(body) - 1, -1, -1):
-            # 跳过第一条用户消息（已经计入）
-            if first_user_idx is not None and i == first_user_idx:
-                continue
-
-            msg_tokens = estimate_message_tokens(body[i])
-            if current_tokens + msg_tokens <= effective_budget:
-                kept_body.insert(0, body[i])
-                current_tokens += msg_tokens
+            if current_tokens + gt <= effective_budget:
+                kept_groups.insert(0, groups[gi])
+                current_tokens += gt
+            elif not kept_groups:
+                # 必须保留至少一组（否则没有可回复的内容）
+                kept_groups.insert(0, groups[gi])
+                current_tokens += gt
+                logger.warning(f"最新一组 token ({gt}) 超出预算，但仍强制保留")
             else:
                 break
 
-        # 在开头插入第一条用户消息
-        if first_user_msg is not None:
-            kept_body.insert(0, first_user_msg)
+        # 确保第一条用户消息所在的组也被保留
+        first_user_kept = False
+        if first_user_content is not None:
+            for g in kept_groups:
+                if any(m.get("role") == "user" and m.get("content") == first_user_content for m in g):
+                    first_user_kept = True
+                    break
 
-        # Step 3: 删除孤立的 tool 消息（其对应的 assistant(tool_calls) 已被裁剪）
-        # 收集所有保留的 assistant(tool_calls) 中的 tool_call_id
-        kept_toolcall_ids: set[str] = set()
-        for msg in kept_body:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    tid = tc.get("id", "") or tc.get("function", {}).get("name", "")
-                    if tid:
-                        kept_toolcall_ids.add(tid)
+        if not first_user_kept and first_user_group_idx is not None:
+            first_user_group = groups[first_user_group_idx]
+            fgt = estimate_messages_tokens(first_user_group)
+            # 替换最旧的保留组
+            old_gt = estimate_messages_tokens(kept_groups[0])
+            kept_groups[0] = first_user_group
+            current_tokens = current_tokens - old_gt + fgt
 
-        # 移除 tool_call_id 不在保留集合中的 tool 消息
-        orphaned_tools = 0
-        filtered_body = []
-        for msg in kept_body:
-            if msg.get("role") == "tool":
-                tc_id = msg.get("tool_call_id", "")
-                if tc_id and tc_id not in kept_toolcall_ids:
-                    orphaned_tools += 1
-                    continue
-            filtered_body.append(msg)
-        kept_body = filtered_body
+        # Step 3: 展平组为消息列表
+        kept_body = [msg for g in kept_groups for msg in g]
 
         final_messages = [system_msg] + kept_body
         final_total = estimate_messages_tokens(final_messages)
 
-        removed = original_count - len(final_messages)
         logger.warning(
             f"上下文裁剪完成: {original_count} → {len(final_messages)} 条消息 "
-            f"({total} → {final_total} tokens), 移除了 {removed} 条早期消息"
-            + (f"，含 {orphaned_tools} 条孤立 tool 消息" if orphaned_tools else "")
+            f"({total} → {final_total} tokens), "
+            f"丢弃了最旧的 {original_count - len(final_messages)} 条消息"
         )
 
         return final_messages

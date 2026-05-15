@@ -39,6 +39,10 @@ class AgentConfig:
     long_term_memory_path: str = "~/.ai_agent/long_term_memory.json"
     state_dir: str = "~/.ai_agent/sessions"  # 会话状态文件存储目录
 
+    # 状态持久化
+    auto_snapshot_interval: int = 0  # 每 N 轮迭代自动快照（0=关闭），保存为 _auto_ 前缀
+    state_compress_threshold: int = 500  # 字符串超过此长度时压缩存储（字符数）
+
     # 工具配置
     tools_dir: Optional[str] = None   # 自定义工具目录
 

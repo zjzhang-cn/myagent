@@ -285,6 +285,7 @@ def interactive_mode(agent: Agent) -> None:
   /state load <name>    加载/切换到指定状态
   /state list           列出所有已保存状态
   /state delete <name>  删除指定状态
+  /state prune          清理所有自动快照
   /memory help          记忆管理（查看/搜索/添加历史记忆）
   /reset, /clear        重置 Agent 状态（清空对话）
   /quit, /exit, /q      退出
@@ -320,16 +321,25 @@ def interactive_mode(agent: Agent) -> None:
                 if not states:
                     print("\n暂无已保存的状态。\n")
                 else:
-                    print(f"\n已保存的状态 ({len(states)} 个):")
+                    auto_count = sum(1 for s in states if s.get("auto_snapshot"))
+                    print(f"\n已保存的状态 ({len(states)} 个"
+                          + f"，含 {auto_count} 个自动快照" if auto_count else ")"
+                          + (")" if not auto_count else ""))
                     print("-" * 60)
                     for s in states:
-                        print(f"  📁 {s['name']}")
+                        prefix = "  🤖" if s.get("auto_snapshot") else "  📁"
+                        print(f"{prefix} {s['name']}")
                         if s.get("saved_at"):
-                            print(f"     保存时间: {s['saved_at'][:19]}")
+                            print(f"     保存: {s['saved_at'][:19]}")
+                        parts = []
                         if s.get("model"):
-                            print(f"     模型: {s['model']}")
+                            parts.append(s["model"])
                         if s.get("agent_state"):
-                            print(f"     状态: {s['agent_state']}")
+                            parts.append(s["agent_state"])
+                        if s.get("schema_version"):
+                            parts.append(f"v{s['schema_version']}")
+                        if parts:
+                            print(f"     {' | '.join(parts)}")
                         print()
                 print()
 
@@ -348,7 +358,17 @@ def interactive_mode(agent: Agent) -> None:
   state load <name>     加载/切换到指定状态
   state list            列出所有已保存状态
   state delete <name>   删除指定状态
+  state prune           删除所有自动快照（_auto_ 前缀）
                 """)
+
+            elif cmd == "prune":
+                states = agent.list_states()
+                pruned = 0
+                for s in states:
+                    if s.get("auto_snapshot"):
+                        if agent.delete_state(s["name"]):
+                            pruned += 1
+                print(f"\n🧹 已清理 {pruned} 个自动快照\n")
 
             else:
                 print(f"\n未知子命令: {cmd}，可用命令: save, load, list, delete, help\n")
