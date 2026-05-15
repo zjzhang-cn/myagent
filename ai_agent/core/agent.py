@@ -759,7 +759,7 @@ class Agent:
             logger.warning("仅剩系统消息，无法进一步裁剪")
             return messages
 
-        # Step 1: 截断过长的工具结果
+        # Step 1: 截断过长的工具结果（保留 tool_call_id 等关键字段）
         max_tool_chars = self.config.max_tool_result_chars
         truncated_count = 0
         for i, msg in enumerate(body):
@@ -767,6 +767,7 @@ class Agent:
                 body[i] = {
                     "role": "tool",
                     "content": truncate_text(msg["content"], max_tool_chars),
+                    "tool_call_id": msg.get("tool_call_id", ""),
                 }
                 truncated_count += 1
 
@@ -814,6 +815,28 @@ class Agent:
         if first_user_msg is not None:
             kept_body.insert(0, first_user_msg)
 
+        # Step 3: 删除孤立的 tool 消息（其对应的 assistant(tool_calls) 已被裁剪）
+        # 收集所有保留的 assistant(tool_calls) 中的 tool_call_id
+        kept_toolcall_ids: set[str] = set()
+        for msg in kept_body:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tid = tc.get("id", "") or tc.get("function", {}).get("name", "")
+                    if tid:
+                        kept_toolcall_ids.add(tid)
+
+        # 移除 tool_call_id 不在保留集合中的 tool 消息
+        orphaned_tools = 0
+        filtered_body = []
+        for msg in kept_body:
+            if msg.get("role") == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                if tc_id and tc_id not in kept_toolcall_ids:
+                    orphaned_tools += 1
+                    continue
+            filtered_body.append(msg)
+        kept_body = filtered_body
+
         final_messages = [system_msg] + kept_body
         final_total = estimate_messages_tokens(final_messages)
 
@@ -821,6 +844,7 @@ class Agent:
         logger.warning(
             f"上下文裁剪完成: {original_count} → {len(final_messages)} 条消息 "
             f"({total} → {final_total} tokens), 移除了 {removed} 条早期消息"
+            + (f"，含 {orphaned_tools} 条孤立 tool 消息" if orphaned_tools else "")
         )
 
         return final_messages
