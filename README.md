@@ -197,6 +197,24 @@ uv run python -m ai_agent.main --log-file debug.log -v "分析代码"
 uv run python -m ai_agent.main --env-file .env.production --list-models
 ```
 
+### 会话持久化
+
+每次 `run()` 完成后会自动保存会话状态到 `state_dir`。文件名格式为 `_auto_{path_hash}_{uuid8}.json`，其中 `path_hash` 是当前工作目录的 SHA256 前 12 位。同目录下已存在自动保存时复用文件名，避免累积。
+
+启动交互模式时默认自动恢复上次会话（`auto_resume=True`）：
+- **按工作目录筛选**：优先匹配当前 `cwd` 的会话
+- **同目录下**：手动保存优先于自动快照，按 `saved_at` 取最新
+- **跨目录回退**：当前目录无匹配时加载任意目录的最新会话
+- 使用 `--no-resume` 跳过自动恢复
+
+```bash
+# 禁用自动恢复
+uv run python -m ai_agent.main --no-resume
+
+# 指定会话存储目录
+uv run python -m ai_agent.main --state-dir ~/my-sessions
+```
+
 ## 编程方式使用
 
 ### 基础用法

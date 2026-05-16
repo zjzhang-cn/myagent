@@ -27,6 +27,15 @@ uv run python -m ai_agent.main --think --model deepseek-v4-flash
 # 记录 LLM 交互日志（生成 .log 和 .jsonl 文件）
 uv run python -m ai_agent.main --log-file agent.log "问题"
 
+# 禁用自动恢复上次会话
+uv run python -m ai_agent.main --no-resume
+
+# 指定会话存储目录
+uv run python -m ai_agent.main --state-dir ~/my-sessions
+
+# 指定长期记忆数据库路径
+uv run python -m ai_agent.main --memory-path ~/my-memory.db
+
 # 运行示例脚本（交互式菜单）
 uv run python ai_agent/example.py
 ```
@@ -53,7 +62,7 @@ ai_agent/
 ├── main.py              # CLI 入口（argparse + 交互式 Shell）
 ├── example.py           # 使用示例
 ├── core/
-│   ├── agent.py         # Agent 主类：ReAct 循环、上下文裁剪、并发执行、错误恢复
+│   ├── agent.py         # Agent 主类：ReAct 循环、上下文裁剪、并发执行、错误恢复、会话持久化
 │   ├── memory.py        # 短期记忆（滑动窗口）、工作记忆（任务状态）、长期记忆（SQLite）
 │   └── planner.py       # 复杂度评估、Plan/PlanStep、LLM 规划与重新规划
 ├── llm/
@@ -81,3 +90,4 @@ ai_agent/
 - **错误恢复**：`_categorize_error()` 将工具失败分类（tool_not_found、timeout、permission 等）。失败步骤触发 `Planner.replan()`，最多重试 `max_replan_attempts` 次
 - **流式输出**：`on_token` 和 `on_thinking` 回调实现实时 Token 显示。设置 `on_token` 后 `_call_llm()` 自动切换为 `chat_stream()` 流式模式
 - **任务规划**：`estimate_complexity()` 使用关键词启发式（多任务连接词、复杂操作动词、长度）。复杂度 >= `plan_threshold_complexity` 时 `Planner.create_plan()` 请求 LLM 分解任务，LLM 失败时降级为简单文本拆分
+- **会话持久化**：`save_state()` / `load_state()` 将对话历史、计划、记忆序列化为 JSON 文件。`auto_snapshot_interval` 控制定期自动快照。每次 `run()` 完成后自动保存 `_auto_{path_hash}_{uuid8}` 格式的会话文件，同目录复用已有文件名。`resume_last_session()` 按 cwd 筛选，优先同目录手动保存 → 同目录自动快照 → 跨目录回退。通过 `--no-resume` / `--state-dir` / `AGENT_STATE_DIR` 控制行为
