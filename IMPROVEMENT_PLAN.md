@@ -127,13 +127,46 @@
   - 设置 Token 预算上限（达到后自动缩减上下文）
   - 记录到日志 / JSONL
 
-### 12. 记忆自动压缩
+### 12. 记忆自动压缩  ✅ 已完成 (2026-05-16)
 
-- **问题**: 短期记忆到长期记忆无自动流转，记忆积累不衰减
+_已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现基础能力。_
+
+- **剩余**:
+  - `remember()` 的相似检测目前用 `content[:50]` 关键词，应升级为 `semantic_search()`
+  - 相似超过 0.85 时合并或更新而非新建
+  - 低重要度记忆（<=2）定期自动归档或删除
+
+### 13. CLI 体验改进
+
+- **问题**: 交互模式缺少历史记录、Tab 补齐、颜色控制等基础能力
 - **方案**:
-  - 短 → 长: 每轮对话结束后，LLM 自动提取关键信息存入长期记忆
-  - 长 → 遗忘: 重要度低于阈值的记忆自动归档
-  - 定期摘要: 多条低重要度记忆合并为摘要
+  - 引入 `prompt_toolkit` 或 `readline` 实现上下键翻历史、行内编辑
+  - `/state` `/memory` 子命令 Tab 自动补齐
+  - `--color` / `--no-color` 参数控制终端输出样式（方便 CI/管道场景）
+
+### 14. 搜索引擎 Provider 冗余
+
+- **问题**: `search_web` 仅依赖 DuckDuckGo 非官方 HTML 解析，容易被封或格式变动，搜索不可靠
+- **方案**:
+  - 支持多 Provider 架构：DuckDuckGo（现有）+ 可选 Provider（SearXNG / SerpAPI / Google CSE）
+  - Provider 切换通过配置项 `search_provider` 控制
+  - 不可用时自动 fallback 到备用 Provider
+
+### 15. 多模态工具扩展
+
+- **问题**: Agent 无法处理图片内容，即使底层 LLM 支持多模态
+- **方案**:
+  - 新增 `read_image(path)` 工具，返回 base64 + MIME 类型用于 LLM 分析
+  - 配置项 `enable_vision` 控制启用（需模型支持）
+  - 图片路径同样受路径沙箱保护
+
+### 16. 首次运行引导
+
+- **问题**: 未配置 API key 时直接 `Missing credentials` 报错退出，体验突兀
+- **方案**:
+  - 检测到未配置时输出交互式引导菜单
+  - `1) 输入密钥  2) 查看配置说明  3) 退出` 选择
+  - 引导用户创建 `.env` 文件并写入密钥
 
 ---
 
@@ -141,22 +174,28 @@
 
 | # | 问题 | 方案 |
 |---|------|------|
-| 13 | `tools = tools if tools else None` 应简化 | 去掉不必要的三元表达式 |
-| 14 | `_force_summary()` 丢弃全部上下文 | 保留最后几轮消息作为总结依据 |
-| 15 | `interactive_mode()` 中 memory 命令占 150+ 行 | 抽离到单独的函数 |
-| 16 | `BaseLLM.chat()` 返回类型标注为 `dict`，实际返回 `LLMResponse` | 修正类型标注 |
-| 17 | 并发执行时 `SecurityContext` 线程泄露 | 使用 `threading.local` 隔离，`try/finally` 保证清理 |
-| 18 | `_build_security_context()` 每轮工具执行都重建 | 缓存上下文或惰性初始化 |
-| 19 | `DEFAULT_SAFE_COMMANDS` 在 `security.py` 和 `config.py` 中有两份 | 统一到一处 |
-| 20 | `search_web` 依赖非官方 DuckDuckGo HTML 端点 | 改为官方 API 或 SerpAPI/Google CSE |
+| 17 | `tools = tools if tools else None` 应简化 | 去掉不必要的三元表达式 |
+| 18 | `_force_summary()` 丢弃全部上下文 | 保留最后几轮消息作为总结依据 |
+| 19 | `interactive_mode()` 中 memory 命令占 150+ 行 | 抽离到单独的函数或文件 |
+| 20 | `BaseLLM.chat()` 返回类型标注为 `dict`，实际返回 `LLMResponse` | 修正类型标注 |
+| 21 | 并发执行时 `SecurityContext` 线程泄露 | 使用 `threading.local` 隔离，`try/finally` 保证清理 |
+| 22 | `_build_security_context()` 每轮工具执行都重建 | 缓存上下文或惰性初始化 |
+| 23 | `DEFAULT_SAFE_COMMANDS` 在 `security.py` 和 `config.py` 中有两份 | 统一到一处 |
+| 24 | `search_web` 依赖非官方 DuckDuckGo HTML 端点 | 改为官方 API 或 SerpAPI/Google CSE |
+| 25 | 无代码格式化/类型检查 | 增加 `ruff` 配置 + pre-commit hook 自动格式化 |
+| 26 | 无 CI 流程 | GitHub Actions: `pytest` + `ruff check`，PR 自动触发 |
+| 27 | README 仅中文，海外用户门槛高 | 补充英文版 README 或双语对照章节 |
+| 28 | `example.py` 未覆盖新功能 | 补充语义搜索、会话持久化、自动恢复的演示 |
+| 29 | 无贡献指南 | 新增 `CONTRIBUTING.md`，说明开发环境、PR 流程、编码规范 |
 
 ---
 
 ## 实施建议
 
-1. **P0 先做** — 测试覆盖是后续所有重构的基础。没有测试之前，不要碰 P1/P2 的架构改造
-2. **P1 选做** — 多 LLM 后端的成本/收益最高，建议第二个推进；API Server 看是否需要嵌入现有系统
-3. **P2/P3 穿插** — 可以每个迭代带 1-2 个小改进
+1. **P0 先做** — 测试覆盖 ✅。下一步推荐错误恢复差异化（改动小收益高）
+2. **P1 选做** — 多 LLM 后端的成本/收益最高；API Server 看是否需要嵌入现有系统
+3. **P2 按需** — Token 监控（20 行）、首次运行引导（提升首次体验）容易做；搜索 Provider 和多模态扩展取决于使用场景
+4. **P3 穿插** — ruff + pre-commit + CI 可一次搞定，后续每轮自动保持代码质量。文档改进可在其他任务间隙顺手推进
 
 ---
 
