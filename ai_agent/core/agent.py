@@ -10,11 +10,13 @@ Agent 运行流程：
 import base64
 import copy
 import datetime
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+import uuid
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -649,9 +651,11 @@ class Agent:
         # 保存重要内容到长期记忆
         self._save_to_long_term(user_input, final_answer)
 
-        # 自动保存上次会话状态（供下次启动恢复）
+        # 自动保存会话状态（按全路径哈希命名，同目录复用已有文件避免累积）
         try:
-            self.save_state("_last")
+            path_hash = hashlib.sha256(os.getcwd().encode()).hexdigest()[:12]
+            auto_name = self._find_auto_name(path_hash) or f"_auto_{path_hash}_{uuid.uuid4().hex[:8]}"
+            self.save_state(auto_name)
         except Exception as e:
             logger.debug(f"自动保存会话状态失败: {e}")
 
@@ -781,6 +785,26 @@ class Agent:
         state_dir = os.path.expanduser(self.config.state_dir)
         os.makedirs(state_dir, exist_ok=True)
         return state_dir
+
+    def _find_auto_name(self, path_hash: str) -> str | None:
+        """查找指定路径哈希已有的自动保存文件名
+
+        Args:
+            path_hash: cwd 的 sha256 前 12 位
+
+        Returns:
+            已有的自动保存名称，不存在则返回 None
+        """
+        prefix = f"_auto_{path_hash}_"
+        state_dir = self._get_state_dir()
+        try:
+            for fname in sorted(os.listdir(state_dir)):
+                if fname.startswith(prefix) and fname.endswith(".json"):
+                    # 去掉 .json 后缀
+                    return fname[:-5]
+        except OSError:
+            pass
+        return None
 
     def resume_last_session(self) -> dict | None:
         """自动恢复上次会话状态

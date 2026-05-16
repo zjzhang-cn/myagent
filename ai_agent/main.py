@@ -347,6 +347,8 @@ def interactive_mode(agent: Agent) -> None:
                     for s in states:
                         prefix = "  🤖" if s.get("auto_snapshot") else "  📁"
                         print(f"{prefix} {s['name']}")
+                        if s.get("cwd"):
+                            print(f"     📂 {s['cwd']}")
                         if s.get("saved_at"):
                             print(f"     保存: {s['saved_at'][:19]}")
                         parts = []
