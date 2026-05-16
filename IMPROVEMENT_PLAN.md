@@ -162,25 +162,39 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 
 ### 16. Skills 技能系统
 
-- **问题**: Agent 只有工具调用（tool calling），没有可复用的"技能"（skills）。每次执行类似任务（如代码审查、文档生成、搜索总结）都需要重复描述步骤，无法像 Claude Code 的 `/review` `/explain` 一样直接调用
-- **方案**: 引入 Skills 框架，实现可复用、可组合的技能模块
-  - **技能定义**: 每个 skill 包含名称、描述、触发词、步骤模板（可用 tool 编排）、可选参数
-  - **技能注册**: `SkillRegistry` 管理所有已注册技能，支持 `@skill` 装饰器注册
+- **问题**: Agent 只有工具调用（tool calling），没有可复用的"技能"（skills）。每次执行类似任务（如代码审查、文档生成、搜索总结）都需要用户从零描述步骤，无法像 Claude Code 的 `/review` 一样一键触发
+- **参考**: 遵循 Claude Code Skills 规范设计
+- **方案**:
+  - **技能定义**: 每个 skill 为一个 Markdown 文件，包含 YAML frontmatter 元数据和步骤内容
+    ```yaml
+    ---
+    name: review
+    description: 审查当前分支的代码变更，给出改进建议
+    metadata:
+      type: code-review
+    triggers:
+      - /review
+      - review this code
+    ---
+    ```
+  - **存储结构**: `~/.ai_agent/skills/` 目录下按 `.md` 文件自动发现，支持子目录和命名空间（如 `code/review.md` → `code:review`）
+  - **技能注册**: `SkillRegistry` 扫描技能目录 + 内置技能，构建名称 → 技能映射。支持 `@skill` 装饰器注册 Python 实现的动态技能
+  - **自动触发**: 交互模式收到用户输入时，按 `triggers` 列表匹配（前缀匹配 `/name` + 语义匹配自然语言），匹配成功则自动加载技能指令
   - **交互命令**:
-    - `/skills` — 列出可用技能
-    - `/skill <name> [args]` — 直接执行技能
-    - `/skill install <path>` — 从文件或 URL 安装第三方技能
-  - **技能来源**:
-    - 内置技能: 随项目发布的默认技能（如代码审查、文档生成）
-    - 用户技能: `~/.ai_agent/skills/` 目录下按文件自动发现
-    - 远程技能: 从 Git URL 或文件安装
-  - **技能执行**: 调用时填充参数 → 注入 ReAct 循环的 system prompt → Agent 按步骤执行
-  - **技能模板支持**:
-    - 多步骤编排（类似 Plan）
-    - 占位符参数（如 `{{path}}`、`{{language}}`）
-    - 条件步骤和循环
-  - **配置项**: `skills_dir`（技能目录）、`enable_skills`（开关）
-  - **估算**: 3-5 天核心框架，后续逐步扩充内置技能
+    - `/skills` — 列出可用技能（含描述和触发词）
+    - `/skill <name> [args]` — 直接执行指定技能
+    - `/skills refresh` — 重新扫描技能目录
+  - **技能模板语法**（Markdown 中可用的指令）:
+    - `{{param}}` — 占位符参数，执行时由用户填充或 LLM 推断
+    - 步骤列表（`1.` `2.`）— ReAct 步骤模板
+    - `tool:tool_name(args)` — 指定步骤调用的工具
+  - **关键设计**:
+    - Skills 不独立于 Agent 运行，而是作为 system prompt 的一部分注入 ReAct 循环
+    - 技能触发后，其步骤模板和参数被展开到 LLM 的上下文提示中
+    - 参数填充支持: 用户显式提供 → LLM 推断 → 交互式询问，三级回退
+    - 内置技能随项目分发（`ai_agent/skills/` 目录），用户技能从 `~/.ai_agent/skills/` 加载
+  - **配置项**: `skills_dir`（技能目录，默认 `~/.ai_agent/skills`）、`enable_skills`（默认 True）
+  - **估算**: 2-3 天核心框架 + markdown 解析，后续逐步扩充内置技能
 
 ### 17. 首次运行引导
 
