@@ -149,6 +149,8 @@ uv run python -m ai_agent.main --list-models
 | `/memory stats` | 查看分类统计 |
 | `/memory list [n]` | 列出最近 n 条记忆（默认 20） |
 | `/memory search <关键词>` | 关键词搜索记忆 |
+| `/memory semsearch <关键词>` | 语义搜索记忆（基于向量相似度） |
+| `/memory ss <关键词>` | 语义搜索简写 |
 | `/memory cat <分类>` | 按分类筛选记忆 |
 | `/memory show <id>` | 查看指定编号记忆的完整内容 |
 | `/memory delete <id>` | 删除指定编号的记忆 |

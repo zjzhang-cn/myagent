@@ -336,7 +336,7 @@ def interactive_mode(agent: Agent) -> None:
   /state list           列出所有已保存状态
   /state delete <name>  删除指定状态
   /state prune          清理所有自动快照
-  /memory help          记忆管理（查看/搜索/添加历史记忆）
+  /memory help          记忆管理（关键词搜索/语义搜索/增删查改/分类统计）
   /reset, /clear        重置 Agent 状态（清空对话）
   /quit, /exit, /q      退出
             """.strip())
@@ -483,6 +483,22 @@ def interactive_mode(agent: Agent) -> None:
                         print()
                 print()
 
+            elif cmd in ("semsearch", "ss") and len(parts) > 2:
+                query = parts[2]
+                results = agent.long_term.semantic_search(query=query, limit=20, min_score=0.1)
+                if not results:
+                    print(f"\n语义搜索未找到与 \"{query}\" 相关的记忆。\n")
+                else:
+                    print(f"\n语义搜索 \"{query}\" (找到 {len(results)} 条):")
+                    print("-" * 60)
+                    for entry, score in results:
+                        created = entry.created_at[:19] if len(entry.created_at) > 19 else entry.created_at
+                        print(f"  [#{entry.id}] [{entry.category}] ★{entry.importance} 相似度:{score:.3f}")
+                        print(f"        {created}")
+                        print(f"        {entry.content[:200]}")
+                        print()
+                print()
+
             elif cmd == "cat" and len(parts) > 2:
                 category = parts[2]
                 entries = agent.long_term.list_all(category=category, limit=50)
@@ -548,7 +564,9 @@ def interactive_mode(agent: Agent) -> None:
   memory                 查看概览（统计 + 最近 10 条）
   memory stats           查看统计
   memory list [n]        列出最近 n 条
-  memory search <关键词>  搜索记忆
+  memory search <关键词>  关键词搜索记忆
+  memory semsearch <关键词>  语义搜索记忆（基于向量相似度）
+  memory ss <关键词>      同上，简写
   memory cat <分类>       按分类筛选
   memory show <id>       查看单条完整内容
   memory delete <id>     删除指定编号的记忆

@@ -252,7 +252,8 @@ class Agent:
         )
         self.working = WorkingMemory()
         self.long_term = LongTermMemory(
-            db_path=self.config.long_term_memory_path
+            db_path=self.config.long_term_memory_path,
+            embedding_fn=self.llm.create_embedding if hasattr(self.llm, 'create_embedding') else None,
         )
         self.short_term.set_system_prompt(self.config.system_prompt)
 

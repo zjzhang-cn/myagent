@@ -281,6 +281,39 @@ class OpenAILLM(BaseLLM):
             logger.warning(f"获取模型列表失败: {e}")
             return [self._model]
 
+    def create_embedding(
+        self,
+        text: str,
+        model: str | None = None,
+    ) -> list[float] | None:
+        """生成文本嵌入向量
+
+        按顺序尝试：指定模型 → text-embedding-3-small → 当前 chat 模型。
+
+        Args:
+            text: 输入文本
+            model: 嵌入模型名（默认为 text-embedding-3-small）
+
+        Returns:
+            嵌入向量列表，失败返回 None
+        """
+        candidates = [model] if model else []
+        candidates += ["text-embedding-3-small", "text-embedding-ada-002", self._model]
+
+        seen = set()
+        for m in candidates:
+            if m in seen:
+                continue
+            seen.add(m)
+            try:
+                resp = self._client.embeddings.create(model=m, input=text)
+                return resp.data[0].embedding
+            except Exception:
+                continue
+
+        logger.warning("所有嵌入模型均不可用，语义搜索将回退到关键词匹配")
+        return None
+
     # ----------------------------------------------------------
     # 辅助方法
     # ----------------------------------------------------------

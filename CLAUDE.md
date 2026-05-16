@@ -91,3 +91,4 @@ ai_agent/
 - **流式输出**：`on_token` 和 `on_thinking` 回调实现实时 Token 显示。设置 `on_token` 后 `_call_llm()` 自动切换为 `chat_stream()` 流式模式
 - **任务规划**：`estimate_complexity()` 使用关键词启发式（多任务连接词、复杂操作动词、长度）。复杂度 >= `plan_threshold_complexity` 时 `Planner.create_plan()` 请求 LLM 分解任务，LLM 失败时降级为简单文本拆分
 - **会话持久化**：`save_state()` / `load_state()` 将对话历史、计划、记忆序列化为 JSON 文件。`auto_snapshot_interval` 控制定期自动快照。每次 `run()` 完成后自动保存 `_auto_{path_hash}_{uuid8}` 格式的会话文件，同目录复用已有文件名。`resume_last_session()` 按 cwd 筛选，优先同目录手动保存 → 同目录自动快照 → 跨目录回退。通过 `--no-resume` / `--state-dir` / `AGENT_STATE_DIR` 控制行为
+- **语义搜索**：通过 LLM Provider 的 `embeddings.create()` API 为每条记忆生成向量。`semantic_search()` 使用余弦相似度排序，在交互模式中用 `/memory semsearch <关键词>` 或简写 `/memory ss <关键词>` 调用

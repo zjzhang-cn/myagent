@@ -8,13 +8,15 @@
 
 import json
 import logging
+import math
 import os
 import sqlite3
+import struct
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -272,16 +274,32 @@ class MemoryEntry:
 
 
 class LongTermMemory:
-    """长期记忆：持久化知识存储，默认使用 SQLite"""
+    """长期记忆：持久化知识存储，默认使用 SQLite
 
-    def __init__(self, db_path: str = "~/.ai_agent/long_term_memory.db"):
+    可选传递 embedding_fn 实现语义搜索：
+        memory = LongTermMemory(embedding_fn=lambda text: llm.create_embedding(text))
+    """
+
+    def __init__(
+        self,
+        db_path: str = "~/.ai_agent/long_term_memory.db",
+        embedding_fn: Callable[[str], list[float] | None] | None = None,
+    ):
+        """
+        Args:
+            db_path: SQLite 数据库路径
+            embedding_fn: 嵌入函数，接受文本返回向量列表。提供后启用语义搜索
+        """
         self.db_path = os.path.expanduser(db_path)
+        self._embedding_fn = embedding_fn
         self._init_db()
 
     def _init_db(self) -> None:
-        """初始化数据库"""
+        """初始化数据库（含自动迁移）"""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._conn = sqlite3.connect(self.db_path)
+
+        # 主表
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,6 +314,33 @@ class LongTermMemory:
             CREATE INDEX IF NOT EXISTS idx_memories_category
             ON memories(category)
         """)
+
+        # 嵌入向量表（按行存储 float32）
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                memory_id INTEGER PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                dim INTEGER NOT NULL DEFAULT 1536,
+                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            )
+        """)
+
+        # 自动迁移：为旧数据库添加 embedding 表
+        existing_tables = {
+            r[0] for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "memory_embeddings" not in existing_tables:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_embeddings (
+                    memory_id INTEGER PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    dim INTEGER NOT NULL DEFAULT 1536,
+                    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )
+            """)
+
         self._conn.commit()
 
     def add(
@@ -304,15 +349,97 @@ class LongTermMemory:
         category: str = "fact",
         importance: int = 1,
     ) -> int:
-        """添加一条记忆，返回 id"""
+        """添加一条记忆，返回 id（会同步生成嵌入向量）"""
         now = datetime.now().isoformat()
         cursor = self._conn.execute(
             "INSERT INTO memories (category, content, importance, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (category, content, importance, now, now),
         )
+        memory_id = cursor.lastrowid
+
+        # 异步生成嵌入向量
+        self._store_embedding(memory_id, content)
+
         self._conn.commit()
-        return cursor.lastrowid
+        return memory_id
+
+    def _store_embedding(self, memory_id: int, content: str) -> None:
+        """生成并存储嵌入向量（embedding_fn 未设置时跳过）"""
+        if not self._embedding_fn:
+            return
+        try:
+            vector = self._embedding_fn(content)
+            if vector is None:
+                return
+            blob = struct.pack(f"{len(vector)}f", *vector)
+            self._conn.execute(
+                "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, dim) "
+                "VALUES (?, ?, ?)",
+                (memory_id, blob, len(vector)),
+            )
+        except Exception as e:
+            logger.debug(f"存储嵌入向量失败 (id={memory_id}): {e}")
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        """计算余弦相似度"""
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(x * x for x in b))
+        if na == 0 or nb == 0:
+            return 0.0
+        return dot / (na * nb)
+
+    def semantic_search(
+        self,
+        query: str,
+        limit: int = 10,
+        min_score: float = 0.0,
+    ) -> list[tuple[MemoryEntry, float]]:
+        """语义搜索记忆（需要 embedding_fn）
+
+        Args:
+            query: 查询文本
+            limit: 最大返回条数
+            min_score: 最小相似度阈值（0.0-1.0）
+
+        Returns:
+            [(MemoryEntry, similarity_score), ...]，按相似度降序排列
+        """
+        if not self._embedding_fn:
+            logger.warning("语义搜索不可用：未设置 embedding_fn")
+            return []
+
+        query_vec = self._embedding_fn(query)
+        if query_vec is None:
+            return []
+
+        # 加载所有嵌入向量
+        rows = self._conn.execute(
+            "SELECT memory_id, embedding, dim FROM memory_embeddings"
+        ).fetchall()
+
+        if not rows:
+            return []
+
+        # 逐一计算余弦相似度
+        scored = []
+        for memory_id, blob, dim in rows:
+            try:
+                vec = list(struct.unpack(f"{dim}f", blob))
+                score = self._cosine_similarity(query_vec, vec)
+                if score < min_score:
+                    continue
+                entry = self.get(memory_id)
+                if entry:
+                    scored.append((entry, score))
+            except Exception as e:
+                logger.debug(f"语义搜索跳过 id={memory_id}: {e}")
+
+        # 按相似度降序排列
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
 
     def get(self, memory_id: int) -> MemoryEntry | None:
         """获取单条记忆"""
