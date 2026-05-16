@@ -19,7 +19,8 @@ Thumbs.db
 *.swo
 
 # Environment
-.env
+.env*
+!.env.example
 
 # Agent data
 *.db
