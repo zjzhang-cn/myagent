@@ -20,6 +20,7 @@ AI Agent 主入口
 """
 
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -92,6 +93,9 @@ def create_agent(
     temperature: float | None = None,
     state_dir: str | None = None,
     memory_path: str | None = None,
+    max_context_tokens: int | None = None,
+    max_tool_result_chars: int | None = None,
+    max_tokens: int | None = None,
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
@@ -104,6 +108,15 @@ def create_agent(
     temperature = temperature if temperature is not None else float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
     state_dir = state_dir or os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
     memory_path = memory_path or os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
+    if max_context_tokens is None:
+        val = os.environ.get("AGENT_MAX_CONTEXT_TOKENS", "")
+        max_context_tokens = int(val) if val else 65536
+    if max_tool_result_chars is None:
+        val = os.environ.get("AGENT_MAX_TOOL_RESULT_CHARS", "")
+        max_tool_result_chars = int(val) if val else 32768
+    if max_tokens is None:
+        val = os.environ.get("AGENT_MAX_TOKENS", "")
+        max_tokens = int(val) if val else 4096
     config = AgentConfig(
         model=model,
         api_key=api_key,
@@ -111,6 +124,9 @@ def create_agent(
         temperature=temperature,
         state_dir=state_dir,
         long_term_memory_path=memory_path,
+        max_context_tokens=max_context_tokens,
+        max_tool_result_chars=max_tool_result_chars,
+        max_tokens=max_tokens,
         verbose=verbose,
     )
 
@@ -258,7 +274,7 @@ def interactive_mode(agent: Agent) -> None:
         if agent.current_plan:
             plan_info = f" | 计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步"
         print(f"🔄 已恢复会话: {resumed['name']} ({saved_at}){plan_info}")
-    print("命令: /quit 退出  /reset 重置  /tools 工具列表  /state 状态管理  /memory 记忆管理")
+    print("命令: /quit 退出  /save 保存  /reset 重置  /tools 工具列表  /state 状态管理  /memory 记忆管理")
     print("=" * 60 + "\n")
 
     while True:
@@ -294,10 +310,26 @@ def interactive_mode(agent: Agent) -> None:
             print()
             continue
 
+        if lowered == "save" or lowered.startswith("save "):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                name = parts[1].strip()
+            else:
+                import hashlib
+                path_hash = hashlib.sha256(os.getcwd().encode()).hexdigest()[:8]
+                name = f"manual_{path_hash}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            try:
+                fpath = agent.save_state(name)
+                print(f"\n✅ 会话已保存: {name}\n   {fpath}\n")
+            except Exception as e:
+                print(f"\n❌ 保存失败: {e}\n")
+            continue
+
         if lowered in ("help", "h"):
             print("""
 可用命令:
   /help, /h             显示此帮助
+  /save [名称]           保存当前会话（不填名称则自动生成）
   /tools                列出可用工具
   /state save <name>    保存当前会话状态
   /state load <name>    加载/切换到指定状态
@@ -672,6 +704,27 @@ def main():
         metavar="PATH",
         help="长期记忆数据库路径（默认 ~/.ai_agent/long_term_memory.db，也可通过 AGENT_MEMORY_PATH 环境变量设置）",
     )
+    parser.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="最大上下文 token 数（默认 65536，也可通过 AGENT_MAX_CONTEXT_TOKENS 环境变量设置）",
+    )
+    parser.add_argument(
+        "--max-tool-result-chars",
+        type=int,
+        default=None,
+        metavar="N",
+        help="单条工具结果最大字符数（默认 32768，也可通过 AGENT_MAX_TOOL_RESULT_CHARS 环境变量设置）",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="LLM 单次输出最大 token 数（默认 4096，也可通过 AGENT_MAX_TOKENS 环境变量设置）",
+    )
 
     args = parser.parse_args()
 
@@ -690,6 +743,15 @@ def main():
         args.state_dir = os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
     if args.memory_path is None:
         args.memory_path = os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
+    if args.max_context_tokens is None:
+        val = os.environ.get("AGENT_MAX_CONTEXT_TOKENS", "")
+        args.max_context_tokens = int(val) if val else 65536
+    if args.max_tool_result_chars is None:
+        val = os.environ.get("AGENT_MAX_TOOL_RESULT_CHARS", "")
+        args.max_tool_result_chars = int(val) if val else 32768
+    if args.max_tokens is None:
+        val = os.environ.get("AGENT_MAX_TOKENS", "")
+        args.max_tokens = int(val) if val else 4096
 
     # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
     setup_logging(verbose=args.verbose, log_file=args.log_file)
@@ -721,6 +783,9 @@ def main():
         temperature=args.temperature,
         state_dir=args.state_dir,
         memory_path=args.memory_path,
+        max_context_tokens=args.max_context_tokens,
+        max_tool_result_chars=args.max_tool_result_chars,
+        max_tokens=args.max_tokens,
         verbose=args.verbose,
         on_step=_print_step,
         on_token=stream_print if not args.query else None,

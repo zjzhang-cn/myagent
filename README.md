@@ -96,6 +96,9 @@ uv run python -m ai_agent.main --list-models
 | `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
 | `--state-dir` | — | 会话状态存储目录 | `AGENT_STATE_DIR` 环境变量 或 `~/.ai_agent/sessions` |
 | `--memory-path` | — | 长期记忆数据库路径 | `AGENT_MEMORY_PATH` 环境变量 或 `~/.ai_agent/long_term_memory.db` |
+| `--max-context-tokens` | — | 最大上下文 token 数 | `AGENT_MAX_CONTEXT_TOKENS` 环境变量 或 `65536` |
+| `--max-tool-result-chars` | — | 单条工具结果最大字符数 | `AGENT_MAX_TOOL_RESULT_CHARS` 环境变量 或 `32768` |
+| `--max-tokens` | — | LLM 单次输出最大 token 数 | `AGENT_MAX_TOKENS` 环境变量 或 `4096` |
 | `--list-models` | — | 列出 API 可用模型并退出 | — |
 
 ### 环境变量
@@ -108,6 +111,9 @@ uv run python -m ai_agent.main --list-models
 | `AGENT_TEMPERATURE` | 默认温度（命令行 `--temperature` 优先级更高） |
 | `AGENT_STATE_DIR` | 会话状态存储目录（命令行 `--state-dir` 优先级更高） |
 | `AGENT_MEMORY_PATH` | 长期记忆数据库路径（命令行 `--memory-path` 优先级更高） |
+| `AGENT_MAX_CONTEXT_TOKENS` | 最大上下文 token 数（命令行 `--max-context-tokens` 优先级更高，默认 65536） |
+| `AGENT_MAX_TOOL_RESULT_CHARS` | 单条工具结果最大字符数（命令行 `--max-tool-result-chars` 优先级更高，默认 32768） |
+| `AGENT_MAX_TOKENS` | LLM 单次输出最大 token 数（命令行 `--max-tokens` 优先级更高，默认 4096） |
 
 所有环境变量也可通过 `.env` 文件设置。使用 `--env-file` 可指定自定义路径。
 
@@ -120,6 +126,7 @@ uv run python -m ai_agent.main --list-models
 | 命令 | 说明 |
 |------|------|
 | `/help`, `/h` | 显示帮助信息 |
+| `/save [名称]` | 保存当前会话状态（不填名称则自动生成） |
 | `/tools` | 列出所有可用工具及参数说明 |
 | `/reset`, `/clear` | 重置 Agent 状态（清空对话历史和计划） |
 | `/quit`, `/exit`, `/q` | 退出交互模式 |
@@ -329,8 +336,8 @@ config = AgentConfig(
     max_replan_attempts=2,            # 失败时最多重新规划次数
 
     # 上下文窗口管理
-    max_context_tokens=8192,          # 最大上下文 token 数，超出自动裁剪
-    max_tool_result_chars=3000,       # 单条工具结果最大字符数，超出截断
+    max_context_tokens=65536,         # 最大上下文 token 数，超出自动裁剪
+    max_tool_result_chars=32768,      # 单条工具结果最大字符数，超出截断
 
     # 记忆与状态配置
     short_term_memory_size=20,        # 短期记忆窗口大小

@@ -31,8 +31,8 @@ class AgentConfig:
     max_replan_attempts: int = 2      # 执行失败时最多重新规划次数
 
     # 上下文窗口管理
-    max_context_tokens: int = 8192   # 最大上下文 token 数，超出自动裁剪
-    max_tool_result_chars: int = 3000  # 单条工具结果最大字符数，超出截断
+    max_context_tokens: int = 65536  # 最大上下文 token 数，超出自动裁剪（64K）
+    max_tool_result_chars: int = 32768  # 单条工具结果最大字符数，超出截断（32K）
 
     # 记忆配置
     short_term_memory_size: int = 20  # 最近 N 轮对话
