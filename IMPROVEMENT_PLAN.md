@@ -2,7 +2,7 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-15 (上下文裁剪 + 持久化改进完成)
+最后更新: 2026-05-16 (长期记忆语义搜索 + 配置可配置化完成)
 
 ---
 
@@ -36,14 +36,14 @@
 - **实现**: 新增 `_partition_groups()` 静态方法，重写 `_trim_messages()` 以组为单位丢弃
   - `ai_agent/core/agent.py` — 2 个方法，约 100 行
 
-### 4. 长期记忆语义搜索
+### 4. 长期记忆语义搜索  ✅ 已完成 (2026-05-16)
 
 - **问题**: LongTermMemory 仅靠 SQLite `LIKE` 关键词匹配搜索，无法关联语义相似的内容（如"简洁代码"和"干净的 style"）
-- **方案**: 引入轻量级嵌入向量检索
-  - 方案 A: 使用 `sentence-transformers` 本地模型做嵌入（离线、隐私好）
-  - 方案 B: 使用 OpenAI Embeddings API（需联网）
-  - 内存向量索引（`faiss` 或简单的 `numpy` 余弦相似度），与 SQLite 搭配使用
-  - 定期自动压缩/合并相似记忆
+- **方案**:
+  - OpenAILLM.create_embedding() 调用 embeddings.create API，自动回退多个嵌入模型
+  - memory_embeddings 表存储 float32 向量，add() 时同步生成
+  - semantic_search() 余弦相似度排序，支持 min_score 阈值
+  - /memory semsearch / /memory ss 交互命令，失败时回退到关键词匹配
 
 ---
 
