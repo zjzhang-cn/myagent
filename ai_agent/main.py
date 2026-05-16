@@ -90,6 +90,8 @@ def create_agent(
     api_key: str | None = None,
     openai_base_url: str | None = None,
     temperature: float | None = None,
+    state_dir: str | None = None,
+    memory_path: str | None = None,
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
@@ -100,11 +102,15 @@ def create_agent(
     """创建并配置 Agent"""
     model = model or os.environ.get("AGENT_MODEL", "deepseek-v4-flash")
     temperature = temperature if temperature is not None else float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
+    state_dir = state_dir or os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
+    memory_path = memory_path or os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
     config = AgentConfig(
         model=model,
         api_key=api_key,
         openai_base_url=openai_base_url,
         temperature=temperature,
+        state_dir=state_dir,
+        long_term_memory_path=memory_path,
         verbose=verbose,
     )
 
@@ -560,9 +566,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  %(prog)s                                    # 交互模式
-  %(prog)s --model gpt-4o "搜索今天的科技新闻"    # 指定模型
-  %(prog)s --list-models                       # 列出可用模型
+  %(prog)s                                               # 交互模式
+  %(prog)s --model gpt-4o "搜索今天的科技新闻"               # 单次查询
+  %(prog)s --think --model deepseek-v4-flash              # 启用推理显示
+  %(prog)s --log-file agent.log "搜索新闻"                 # 记录交互日志
+  %(prog)s --state-dir ~/my-sessions                       # 指定会话存储目录
+  %(prog)s --list-models                                  # 列出可用模型
         """,
     )
     parser.add_argument(
@@ -631,6 +640,18 @@ def main():
         metavar="PATH",
         help="LLM 交互日志文件路径（记录所有请求/响应/工具调用）",
     )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        metavar="PATH",
+        help="会话状态存储目录（默认 ~/.ai_agent/sessions，也可通过 AGENT_STATE_DIR 环境变量设置）",
+    )
+    parser.add_argument(
+        "--memory-path",
+        default=None,
+        metavar="PATH",
+        help="长期记忆数据库路径（默认 ~/.ai_agent/long_term_memory.db，也可通过 AGENT_MEMORY_PATH 环境变量设置）",
+    )
 
     args = parser.parse_args()
 
@@ -645,6 +666,10 @@ def main():
         args.model = os.environ.get("AGENT_MODEL", "deepseek-v4-flash")
     if args.temperature is None:
         args.temperature = float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
+    if args.state_dir is None:
+        args.state_dir = os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
+    if args.memory_path is None:
+        args.memory_path = os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
 
     # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
     setup_logging(verbose=args.verbose, log_file=args.log_file)
@@ -674,6 +699,8 @@ def main():
         api_key=args.api_key,
         openai_base_url=args.api_base_url,
         temperature=args.temperature,
+        state_dir=args.state_dir,
+        memory_path=args.memory_path,
         verbose=args.verbose,
         on_step=_print_step,
         on_token=stream_print if not args.query else None,

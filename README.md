@@ -93,6 +93,8 @@ uv run python -m ai_agent.main --list-models
 | `--no-planning` | — | 禁用任务规划 | 关闭（默认启用规划） |
 | `--verbose` | `-v` | 显示 DEBUG 级别详细日志 | 关闭 |
 | `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
+| `--state-dir` | — | 会话状态存储目录 | `AGENT_STATE_DIR` 环境变量 或 `~/.ai_agent/sessions` |
+| `--memory-path` | — | 长期记忆数据库路径 | `AGENT_MEMORY_PATH` 环境变量 或 `~/.ai_agent/long_term_memory.db` |
 | `--list-models` | — | 列出 API 可用模型并退出 | — |
 
 ### 环境变量
@@ -103,6 +105,8 @@ uv run python -m ai_agent.main --list-models
 | `OPENAI_BASE_URL` | API 基础地址 |
 | `AGENT_MODEL` | 默认模型名（命令行 `--model` 优先级更高） |
 | `AGENT_TEMPERATURE` | 默认温度（命令行 `--temperature` 优先级更高） |
+| `AGENT_STATE_DIR` | 会话状态存储目录（命令行 `--state-dir` 优先级更高） |
+| `AGENT_MEMORY_PATH` | 长期记忆数据库路径（命令行 `--memory-path` 优先级更高） |
 
 所有环境变量也可通过 `.env` 文件设置。使用 `--env-file` 可指定自定义路径。
 
@@ -309,9 +313,10 @@ config = AgentConfig(
     max_context_tokens=8192,          # 最大上下文 token 数，超出自动裁剪
     max_tool_result_chars=3000,       # 单条工具结果最大字符数，超出截断
 
-    # 记忆配置
+    # 记忆与状态配置
     short_term_memory_size=20,        # 短期记忆窗口大小
     long_term_memory_path="~/.ai_agent/long_term_memory.db",
+    state_dir="~/.ai_agent/sessions", # 会话状态文件存储目录
 
     # 安全配置
     workspace_directories=["."],      # 文件操作允许的目录列表

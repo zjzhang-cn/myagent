@@ -36,7 +36,7 @@ class AgentConfig:
 
     # 记忆配置
     short_term_memory_size: int = 20  # 最近 N 轮对话
-    long_term_memory_path: str = "~/.ai_agent/long_term_memory.json"
+    long_term_memory_path: str = "~/.ai_agent/long_term_memory.db"
     state_dir: str = "~/.ai_agent/sessions"  # 会话状态文件存储目录
 
     # 状态持久化
@@ -72,3 +72,4 @@ class AgentConfig:
 
     def __post_init__(self):
         self.long_term_memory_path = os.path.expanduser(self.long_term_memory_path)
+        self.state_dir = os.path.expanduser(self.state_dir)
