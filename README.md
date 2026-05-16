@@ -91,6 +91,7 @@ uv run python -m ai_agent.main --list-models
 | `--think` | — | 启用模型推理显示（需模型支持 think） | 关闭 |
 | `--no-think` | — | 强制禁用模型推理 | 关闭 |
 | `--no-planning` | — | 禁用任务规划 | 关闭（默认启用规划） |
+| `--no-resume` | — | 禁用启动时自动恢复上次会话 | 关闭（默认自动恢复） |
 | `--verbose` | `-v` | 显示 DEBUG 级别详细日志 | 关闭 |
 | `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
 | `--state-dir` | — | 会话状态存储目录 | `AGENT_STATE_DIR` 环境变量 或 `~/.ai_agent/sessions` |
@@ -317,6 +318,8 @@ config = AgentConfig(
     short_term_memory_size=20,        # 短期记忆窗口大小
     long_term_memory_path="~/.ai_agent/long_term_memory.db",
     state_dir="~/.ai_agent/sessions", # 会话状态文件存储目录
+    auto_snapshot_interval=0,         # 每 N 轮自动快照（0=关闭）
+    auto_resume=True,                 # 启动时自动恢复上次会话
 
     # 安全配置
     workspace_directories=["."],      # 文件操作允许的目录列表

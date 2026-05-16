@@ -649,6 +649,12 @@ class Agent:
         # 保存重要内容到长期记忆
         self._save_to_long_term(user_input, final_answer)
 
+        # 自动保存上次会话状态（供下次启动恢复）
+        try:
+            self.save_state("_last")
+        except Exception as e:
+            logger.debug(f"自动保存会话状态失败: {e}")
+
         return AgentResult(
             success=True,
             answer=final_answer,
@@ -776,6 +782,48 @@ class Agent:
         os.makedirs(state_dir, exist_ok=True)
         return state_dir
 
+    def resume_last_session(self) -> dict | None:
+        """自动恢复上次会话状态
+
+        优先匹配当前工作目录的会话，其次匹配同模型的历史会话。
+        按 saved_at 降序排列，优先手动保存的状态。
+
+        Returns:
+            加载成功时返回状态信息 dict，否则返回 None
+        """
+        states = self.list_states()
+        if not states:
+            return None
+
+        current_cwd = os.getcwd()
+
+        # 筛选：优先同目录
+        same_cwd = [s for s in states if s.get("cwd", "") == current_cwd]
+        candidates = same_cwd if same_cwd else states
+
+        # 按 saved_at 降序排列
+        candidates.sort(key=lambda s: s.get("saved_at", ""), reverse=True)
+
+        # 优选非自动快照，但对同目录的自动快照也给优先级
+        manual = [s for s in candidates if not s.get("auto_snapshot")]
+        auto = [s for s in candidates if s.get("auto_snapshot")]
+
+        best = None
+        if manual:
+            best = manual[0]
+        elif auto:
+            best = auto[0]
+
+        if best is None:
+            return None
+
+        name = best["name"]
+        if self.load_state(name):
+            src = "同目录" if best in same_cwd else "跨项目"
+            logger.info(f"自动恢复会话 ({src}): {name}")
+            return best
+        return None
+
     def save_state(self, name: str) -> str:
         """保存当前 Agent 状态到文件
 
@@ -798,6 +846,7 @@ class Agent:
                 "replan_count": self._replan_count,
                 "no_toolcall_streak": no_toolcall_streak,
                 "iteration_count": self._iteration_count,
+                "cwd": os.getcwd(),
             },
             "short_term_memory": self.short_term.to_serializable(),
             "working_memory": self.working.to_serializable(),
@@ -915,6 +964,7 @@ class Agent:
                     "saved_at": data.get("saved_at", ""),
                     "model": data.get("meta", {}).get("model", ""),
                     "agent_state": data.get("meta", {}).get("agent_state", ""),
+                    "cwd": data.get("meta", {}).get("cwd", ""),
                     "auto_snapshot": is_auto,
                     "schema_version": data.get("schema_version", 0),
                 })

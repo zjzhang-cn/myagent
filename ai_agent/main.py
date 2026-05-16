@@ -242,10 +242,22 @@ def _make_thinking_printer():
 
 def interactive_mode(agent: Agent) -> None:
     """交互式对话模式"""
+    # 自动恢复上次会话
+    resumed = None
+    if agent.config.auto_resume:
+        resumed = agent.resume_last_session()
+
     print("\n" + "=" * 60)
     print(f"🤖 AI Agent (模型: {agent.llm.model_name})")
     print(f"📦 可用工具: {len(agent.tool_registry.list_tools())} 个")
     print(f"🧠 规划: {'启用' if agent.config.enable_planning else '关闭'}")
+    if resumed:
+        saved_at = resumed.get("saved_at", "")[:19]
+        model = resumed.get("model", "")
+        plan_info = ""
+        if agent.current_plan:
+            plan_info = f" | 计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步"
+        print(f"🔄 已恢复会话: {resumed['name']} ({saved_at}){plan_info}")
     print("命令: /quit 退出  /reset 重置  /tools 工具列表  /state 状态管理  /memory 记忆管理")
     print("=" * 60 + "\n")
 
@@ -571,6 +583,7 @@ def main():
   %(prog)s --think --model deepseek-v4-flash              # 启用推理显示
   %(prog)s --log-file agent.log "搜索新闻"                 # 记录交互日志
   %(prog)s --state-dir ~/my-sessions                       # 指定会话存储目录
+  %(prog)s --no-resume                                     # 禁用自动恢复上次会话
   %(prog)s --list-models                                  # 列出可用模型
         """,
     )
@@ -615,6 +628,11 @@ def main():
         "--no-planning",
         action="store_true",
         help="禁用任务规划",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="禁用启动时自动恢复上次会话状态",
     )
     parser.add_argument(
         "--think",
@@ -711,6 +729,8 @@ def main():
 
     if args.no_planning:
         agent.config.enable_planning = False
+    if args.no_resume:
+        agent.config.auto_resume = False
 
     if args.query:
         # 单次查询模式

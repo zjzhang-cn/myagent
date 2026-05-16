@@ -41,6 +41,7 @@ class AgentConfig:
 
     # 状态持久化
     auto_snapshot_interval: int = 0  # 每 N 轮迭代自动快照（0=关闭），保存为 _auto_ 前缀
+    auto_resume: bool = True  # 启动交互模式时自动恢复上次会话状态
     state_compress_threshold: int = 500  # 字符串超过此长度时压缩存储（字符数）
 
     # 工具配置
