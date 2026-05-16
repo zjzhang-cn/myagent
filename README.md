@@ -49,7 +49,7 @@ cd ~/Documents/myagent
 uv sync
 ```
 
-### 使用
+### 环境配置
 
 将 `.env.example` 复制为 `.env` 并填入 API 密钥，或通过环境变量设置：
 
@@ -63,53 +63,133 @@ export OPENAI_API_KEY="sk-xxx"
 export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 ```
 
-**交互模式**（自动显示思考过程、流式输出）：
+### 首次运行
 
 ```bash
+# 交互模式
 uv run ai-agent --model deepseek-v4-flash
-# 或
-uv run python -m ai_agent.main --model deepseek-v4-flash
-```
 
-**启用模型推理显示**（需模型支持 think）：
+# 单次查询
+uv run python -m ai_agent.main --model deepseek-v4-flash "搜索今天的科技新闻"
 
-```bash
-uv run python -m ai_agent.main --think --model deepseek-v4-flash
-```
-
-**记录 LLM 交互日志**：
-
-```bash
-uv run python -m ai_agent.main --log-file agent.log "搜索新闻"
-# 生成 agent.log（可读日志）和 agent.jsonl（原始请求/响应）
-```
-
-交互命令：
-- 输入问题直接对话（思考过程实时显示）
-- `tools` — 查看可用工具列表
-- `memory` — 查看长期记忆
-- `reset` — 重置 Agent 状态
-- `quit` — 退出
-
-**单次查询**：
-
-```bash
-uv run python -m ai_agent.main --model deepseek-v4-flash "搜索今天的科技新闻，保存到 news.txt"
-```
-
-**列出可用模型**：
-
-```bash
+# 列出可用模型
 uv run python -m ai_agent.main --list-models
 ```
 
-**使用 OpenAI 模型**：
+## CLI 参考
+
+### 命令行参数
+
+| 参数 | 简写 | 说明 | 默认值 |
+|------|------|------|--------|
+| `query` | — | 要执行的查询（位置参数，不提供则进入交互模式） | — |
+| `--model` | `-m` | 模型名称 | `AGENT_MODEL` 环境变量 或 `deepseek-v4-flash` |
+| `--api-key` | — | API 密钥 | `OPENAI_API_KEY` 环境变量 |
+| `--api-base-url` | — | API 基础地址 | 根据模型名自动推断，或 `OPENAI_BASE_URL` 环境变量 |
+| `--temperature` | `-t` | 生成温度 (0.0–2.0) | `AGENT_TEMPERATURE` 环境变量 或 `0.7` |
+| `--env-file` | — | 指定 `.env` 文件路径 | 自动查找项目根目录的 `.env` |
+| `--think` | — | 启用模型推理显示（需模型支持 think） | 关闭 |
+| `--no-think` | — | 强制禁用模型推理 | 关闭 |
+| `--no-planning` | — | 禁用任务规划 | 关闭（默认启用规划） |
+| `--verbose` | `-v` | 显示 DEBUG 级别详细日志 | 关闭 |
+| `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
+| `--list-models` | — | 列出 API 可用模型并退出 | — |
+
+### 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `OPENAI_API_KEY` | API 密钥（必填） |
+| `OPENAI_BASE_URL` | API 基础地址 |
+| `AGENT_MODEL` | 默认模型名（命令行 `--model` 优先级更高） |
+| `AGENT_TEMPERATURE` | 默认温度（命令行 `--temperature` 优先级更高） |
+
+所有环境变量也可通过 `.env` 文件设置。使用 `--env-file` 可指定自定义路径。
+
+### 交互模式命令
+
+交互模式下，输入以 `/` 开头或不带前缀均可：
+
+**基础命令：**
+
+| 命令 | 说明 |
+|------|------|
+| `/help`, `/h` | 显示帮助信息 |
+| `/tools` | 列出所有可用工具及参数说明 |
+| `/reset`, `/clear` | 重置 Agent 状态（清空对话历史和计划） |
+| `/quit`, `/exit`, `/q` | 退出交互模式 |
+
+**状态管理 (`/state`)：**
+
+| 命令 | 说明 |
+|------|------|
+| `/state save <name>` | 保存当前会话状态（对话历史、计划、配置） |
+| `/state load <name>` | 加载/切换到指定状态 |
+| `/state list` | 列出所有已保存状态（标注自动快照） |
+| `/state delete <name>` | 删除指定状态 |
+| `/state prune` | 清理所有自动快照（`_auto_` 前缀） |
+
+**记忆管理 (`/memory`)：**
+
+| 命令 | 说明 |
+|------|------|
+| `/memory` | 查看概览（统计 + 最近 10 条） |
+| `/memory stats` | 查看分类统计 |
+| `/memory list [n]` | 列出最近 n 条记忆（默认 20） |
+| `/memory search <关键词>` | 关键词搜索记忆 |
+| `/memory cat <分类>` | 按分类筛选记忆 |
+| `/memory show <id>` | 查看指定编号记忆的完整内容 |
+| `/memory delete <id>` | 删除指定编号的记忆 |
+| `/memory forget <关键词>` | 模糊搜索并删除匹配的记忆 |
+| `/memory add <内容> [分类]` | 手动添加一条记忆 |
+| `/memory help` | 显示记忆管理帮助 |
+
+### 使用示例
+
+**交互模式：**
 
 ```bash
-# 通过环境变量设置 API Key 和 Base URL
-export OPENAI_API_KEY="sk-xxx"
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-uv run python -m ai_agent.main --model gpt-4o "搜索今天的科技新闻"
+# 基础交互（自动显示思考过程、流式输出）
+uv run ai-agent --model deepseek-v4-flash
+
+# 启用模型推理显示（需模型支持 think）
+uv run python -m ai_agent.main --think --model deepseek-v4-flash
+
+# 详细日志模式
+uv run python -m ai_agent.main --model gpt-4o --verbose
+```
+
+**单次查询：**
+
+```bash
+# 基础查询
+uv run python -m ai_agent.main --model deepseek-v4-flash "分析这个项目结构"
+
+# 指定 API 地址（非 OpenAI 兼容服务）
+uv run python -m ai_agent.main \
+  --model deepseek-v4-flash \
+  --api-base-url https://api.deepseek.com/v1 \
+  "搜索今天的科技新闻，保存到 news.txt"
+
+# 自定义温度
+uv run python -m ai_agent.main --model gpt-4o -t 0.3 "翻译这段文字"
+```
+
+**日志记录：**
+
+```bash
+# 记录完整 LLM 交互日志
+uv run python -m ai_agent.main --log-file agent.log "搜索新闻"
+# 生成 agent.log（可读日志）和 agent.jsonl（原始请求/响应）
+
+# 结合 verbose 查看实时调试信息
+uv run python -m ai_agent.main --log-file debug.log -v "分析代码"
+```
+
+**使用自定义环境文件：**
+
+```bash
+uv run python -m ai_agent.main --env-file .env.production --list-models
 ```
 
 ## 编程方式使用
