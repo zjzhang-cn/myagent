@@ -47,6 +47,14 @@ class AgentConfig:
     # 工具配置
     tools_dir: Optional[str] = None   # 自定义工具目录
 
+    # 技能配置
+    skills: list[dict] = field(default_factory=list)
+    """内联技能定义列表，每项为 Skill 的字典表示"""
+    skills_dir: str | None = None
+    """技能定义文件目录，启动时自动加载其中的 .json 文件"""
+    enable_skills: bool = True
+    """是否启用技能系统"""
+
     # 安全配置
     workspace_directories: list[str] = field(default_factory=lambda: ["."])
     """文件操作允许的目录列表（默认仅当前目录）。添加更多: ['.', '~/projects']"""

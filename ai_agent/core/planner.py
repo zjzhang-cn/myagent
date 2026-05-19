@@ -8,13 +8,18 @@
 4. 检测可并行执行的步骤
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from ai_agent.core.skills import Skill, SkillRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -289,14 +294,17 @@ class Planner:
         self,
         llm_chat: Callable,
         tools_description: str = "",
+        skill_registry: SkillRegistry | None = None,
     ):
         """
         Args:
             llm_chat: LLM 聊天函数，签名: (messages: list[dict]) -> str
             tools_description: 可用工具的描述文本
+            skill_registry: 技能注册表（可选），提供后启用技能匹配快速路径
         """
         self._chat = llm_chat
         self._tools_desc = tools_description
+        self._skill_registry = skill_registry
 
     def should_plan(self, user_input: str, threshold: int = 3) -> bool:
         """判断是否需要启动规划
@@ -352,20 +360,52 @@ class Planner:
             logger.warning(f"LLM 二次验证失败: {e}，回退到关键词判断")
             return estimate_complexity(user_input) >= 4
 
+    def plan_with_skill(self, task: str, skill_name: str) -> Plan | None:
+        """使用指定名称的技能来生成计划。
+
+        Args:
+            task: 任务描述
+            skill_name: 技能名称（支持部分匹配）
+
+        Returns:
+            匹配成功时返回 Plan，否则返回 None
+        """
+        if not self._skill_registry:
+            return None
+        skill = self._skill_registry.find_by_name(skill_name)
+        if skill:
+            return self._plan_from_skill(task, skill)
+        return None
+
     def create_plan(self, task: str) -> Plan:
-        """使用 LLM 将任务分解为执行步骤（含依赖关系）"""
+        """使用 LLM 将任务分解为执行步骤（含依赖关系）。
+
+        技能元数据会注入到提示词中作为参考（渐进式披露第一层）。
+        LLM 可以通过返回特殊的 skill 字段来请求加载完整技能内容。
+        """
+        # 构建技能元数据部分
+        skills_section = ""
+        if self._skill_registry:
+            skills_section = self._skill_registry.describe_for_prompt()
+            if skills_section:
+                skills_section = f"\n{skills_section}\n"
+
         messages = [
             {
                 "role": "system",
                 "content": (
                     "你是一个任务规划专家。请将用户的请求分解为具体的执行步骤。\n"
-                    f"可用工具：{self._tools_desc}\n\n"
+                    f"可用工具：{self._tools_desc}\n"
+                    f"{skills_section}"
                     "请输出 JSON 格式的计划，每个步骤包含以下字段：\n"
                     "- id: 步骤编号（从1开始）\n"
                     "- description: 步骤描述\n"
                     "- tool_hint: 建议使用的工具名（可选）\n"
-                    '- dependencies: 依赖的步骤 id 列表（如 [1] 表示依赖第1步完成，[] 表示无依赖）\n\n'
-                    '格式：{"steps": [{"id": 1, "description": "...", "tool_hint": "tool_name", "dependencies": []}, ...]}\n'
+                    '- dependencies: 依赖的步骤 id 列表（如 [1] 表示依赖第1步完成，[] 表示无依赖）\n'
+                    '- skill: 如果某个可用技能的描述与任务高度匹配，可以在此字段填写技能名称'
+                    "，该技能的内容将被加载用于指导执行（可选）\n\n"
+                    '格式：{"steps": [{"id": 1, "description": "...", "tool_hint": "tool_name",'
+                    ' "dependencies": [], "skill": "技能名(可选)"}, ...]}\n'
                     "要求：\n"
                     "1. 步骤应该具体、可执行，每个步骤完成一件事\n"
                     "2. 步骤总数不超过 10 个\n"
@@ -384,6 +424,11 @@ class Planner:
         except Exception as e:
             logger.warning(f"LLM 规划失败: {e}，使用简单分解")
             return self._simple_decompose(task)
+
+    def _plan_from_skill(self, task: str, skill: Skill) -> Plan:
+        """使用技能模板生成执行计划"""
+        logger.info(f"使用技能生成计划: '{skill.name}' ({skill.description})")
+        return skill.to_plan(task)
 
     def _parse_plan(self, task: str, response: str) -> Plan:
         """从 LLM 响应中解析执行计划"""

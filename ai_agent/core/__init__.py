@@ -5,6 +5,7 @@ from ai_agent.core.memory import (
     WorkingMemory,
 )
 from ai_agent.core.planner import Plan, Planner, PlanStep, StepStatus
+from ai_agent.core.skills import Skill, SkillRegistry, SkillStep
 
 __all__ = [
     "Agent",
@@ -17,4 +18,7 @@ __all__ = [
     "Planner",
     "PlanStep",
     "StepStatus",
+    "Skill",
+    "SkillRegistry",
+    "SkillStep",
 ]

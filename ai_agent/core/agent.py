@@ -26,6 +26,7 @@ from typing import Callable
 from ai_agent.config import AgentConfig
 from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, StepStatus
+from ai_agent.core.skills import Skill, SkillRegistry, load_skills_from_directory
 from ai_agent.llm.base import BaseLLM, LLMResponse
 from ai_agent.tools.registry import ToolRegistry
 from ai_agent.utils.security import SecurityContext, set_security_context, clear_security_context
@@ -210,6 +211,7 @@ class Agent:
         config: AgentConfig | None = None,
         llm: BaseLLM | None = None,
         tool_registry: ToolRegistry | None = None,
+        skill_registry: SkillRegistry | None = None,
         on_step: Callable[[str, dict], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
@@ -219,6 +221,7 @@ class Agent:
             config: Agent 配置
             llm: LLM 实例
             tool_registry: 工具注册表
+            skill_registry: 技能注册表（可选），提供后启用技能匹配规划
             on_step: 步骤回调 (event_type, data) -> None
                      event_type: "planning" | "thinking" | "acting" | "observing" | "done" | "token"
             on_token: 流式 token 回调 (token: str) -> None
@@ -246,6 +249,33 @@ class Agent:
             tool_registry = get_registry()
         self.tool_registry = tool_registry
 
+        # 技能注册表
+        if skill_registry is None:
+            skill_registry = SkillRegistry()
+        self.skill_registry = skill_registry
+
+        # 自动加载技能（始终加载到注册表，enable_skills 仅控制是否传递给规划器）
+        # 内联技能
+        for skill_dict in self.config.skills:
+            try:
+                skill = Skill.from_dict(skill_dict)
+                if skill.name:
+                    self.skill_registry.register(skill)
+            except Exception as e:
+                logger.warning(f"内联技能加载失败: {e}")
+
+        # 目录技能
+        if self.config.skills_dir:
+            skills_dir = os.path.expanduser(self.config.skills_dir)
+            try:
+                loaded = load_skills_from_directory(skills_dir)
+                for skill in loaded:
+                    self.skill_registry.register(skill)
+                if loaded:
+                    logger.info(f"从 {skills_dir} 加载了 {len(loaded)} 个技能")
+            except Exception as e:
+                logger.warning(f"从目录加载技能失败: {e}")
+
         # 记忆系统
         self.short_term = ShortTermMemory(
             max_size=self.config.short_term_memory_size
@@ -261,6 +291,7 @@ class Agent:
         self.planner = Planner(
             llm_chat=self._simple_chat,
             tools_description=self.tool_registry.describe_for_prompt(),
+            skill_registry=self.skill_registry if self.config.enable_skills else None,
         )
 
         self.state = AgentState.IDLE
@@ -687,6 +718,15 @@ class Agent:
         for func in functions:
             self.add_tool(func)
 
+    def add_skill(self, skill: Skill) -> None:
+        """注册技能模板"""
+        self.skill_registry.register(skill)
+
+    def add_skills(self, *skills: Skill) -> None:
+        """批量注册技能"""
+        for skill in skills:
+            self.add_skill(skill)
+
     def clear_memory(self) -> None:
         """清除短期和工作记忆"""
         self.short_term.clear()
@@ -1060,6 +1100,12 @@ class Agent:
 
         # 注入工具描述
         system_parts.append("\n## 可用工具\n" + self.tool_registry.describe_for_prompt())
+
+        # 注入技能元数据（渐进式披露第一层：name + description）
+        if self.config.enable_skills and self.skill_registry:
+            skills_desc = self.skill_registry.describe_for_prompt()
+            if skills_desc:
+                system_parts.append("\n" + skills_desc)
 
         # 工具调用格式（根据是否有计划使用不同措辞）
         if self.current_plan:
