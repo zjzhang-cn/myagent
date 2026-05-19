@@ -1137,10 +1137,6 @@ class Agent:
             f"plan={'有' if self.current_plan else '无'}"
         )
 
-        # 上下文窗口裁剪
-        if self.config.max_context_tokens:
-            messages = self._trim_messages(messages)
-
         return messages
 
     @staticmethod
@@ -1162,10 +1158,12 @@ class Agent:
             role = msg.get("role", "")
 
             if role == "tool":
-                # tool 消息必须归属于前一组（assistant tool_calls）
-                if groups:
+                # tool 消息必须归属于前一组，且前一组必须以 assistant(tool_calls) 开头
+                if groups and groups[-1] and groups[-1][0].get("role") == "assistant" and groups[-1][0].get("tool_calls"):
                     groups[-1].append(msg)
                 else:
+                    # 孤立的 tool 消息：没有匹配的 assistant(tool_calls)，自成一组
+                    logger.warning(f"发现孤立的 tool 消息 (tool_call_id={msg.get('tool_call_id', '?')})，自成一组")
                     groups.append([msg])
                 i += 1
 
