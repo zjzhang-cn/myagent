@@ -197,6 +197,14 @@ class ToolCallParser:
         return {"name": tc["name"], "arguments": args}
 
 
+def _find_prev_assistant_in_list(messages: list[dict]) -> dict | None:
+    """从消息列表末尾向前查找最近的一个 assistant(tool_calls) 消息"""
+    for m in reversed(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            return m
+    return None
+
+
 class Agent:
     """AI Agent 主类
 
@@ -1306,14 +1314,6 @@ class Agent:
             )
 
         return result
-
-
-def _find_prev_assistant_in_list(messages: list[dict]) -> dict | None:
-    """从消息列表末尾向前查找最近的一个 assistant(tool_calls) 消息"""
-    for m in reversed(messages):
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            return m
-    return None
 
     def _trim_messages(self, messages: list[dict]) -> list[dict]:
         """
