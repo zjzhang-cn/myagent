@@ -296,6 +296,9 @@ class Agent:
             except Exception as e:
                 logger.warning(f"从目录加载技能失败: {e}")
 
+        # 注册 use_skill 工具（让 LLM 可以按需加载完整技能内容）
+        self._register_use_skill_tool()
+
         # 记忆系统
         self.short_term = ShortTermMemory(
             max_size=self.config.short_term_memory_size
@@ -746,6 +749,32 @@ class Agent:
         """批量注册技能"""
         for skill in skills:
             self.add_skill(skill)
+
+    def _register_use_skill_tool(self) -> None:
+        """注册 use_skill 内置工具，让 LLM 可以按名称加载完整技能内容"""
+        from ai_agent.tools.base import tool
+
+        skill_registry = self.skill_registry  # 闭包捕获
+
+        @tool(
+            name="use_skill",
+            description="加载指定技能的完整指导内容。当系统提示词中的技能描述与任务匹配时，调用此工具获取详细的执行指南",
+            params=[
+                {"name": "skill_name", "type": "string", "description": "要加载的技能名称", "required": True},
+            ],
+        )
+        def use_skill(skill_name: str) -> str:
+            skill = skill_registry.find_by_name(skill_name)
+            if skill is None:
+                available = [s.name for s in skill_registry.list_all()]
+                return (
+                    f"未找到技能 '{skill_name}'。\n"
+                    f"可用技能: {', '.join(available) if available else '(无)'}"
+                )
+            return skill.format_for_prompt()
+
+        self.tool_registry.register_function(use_skill)
+        logger.debug("use_skill 工具已注册")
 
     def clear_memory(self) -> None:
         """清除短期和工作记忆"""
