@@ -45,7 +45,8 @@ class AgentConfig:
     state_compress_threshold: int = 500  # 字符串超过此长度时压缩存储（字符数）
 
     # 工具配置
-    tools_dir: Optional[str] = None   # 自定义工具目录
+    tools_dir: str = "~/.ai_agent/tools"
+    """自定义工具目录，启动时自动加载其中的 @tool 装饰的 Python 文件"""
 
     # 技能配置
     skills: list[dict] = field(default_factory=list)

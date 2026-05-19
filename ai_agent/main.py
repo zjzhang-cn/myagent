@@ -96,6 +96,7 @@ def create_agent(
     max_context_tokens: int | None = None,
     max_tool_result_chars: int | None = None,
     max_tokens: int | None = None,
+    tools_dir: str | None = None,
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
@@ -108,6 +109,7 @@ def create_agent(
     temperature = temperature if temperature is not None else float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
     state_dir = state_dir or os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
     memory_path = memory_path or os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
+    tools_dir = tools_dir or os.environ.get("AGENT_TOOLS_DIR")
     if max_context_tokens is None:
         val = os.environ.get("AGENT_MAX_CONTEXT_TOKENS", "")
         max_context_tokens = int(val) if val else 65536
@@ -127,6 +129,7 @@ def create_agent(
         max_context_tokens=max_context_tokens,
         max_tool_result_chars=max_tool_result_chars,
         max_tokens=max_tokens,
+        tools_dir=tools_dir,
         verbose=verbose,
     )
 
@@ -682,6 +685,12 @@ def main():
         help="禁用任务规划",
     )
     parser.add_argument(
+        "--tools-dir",
+        default=None,
+        metavar="PATH",
+        help="自定义工具目录，启动时自动加载其中的 @tool 装饰的 Python 文件",
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="禁用启动时自动恢复上次会话状态",
@@ -804,6 +813,7 @@ def main():
         max_context_tokens=args.max_context_tokens,
         max_tool_result_chars=args.max_tool_result_chars,
         max_tokens=args.max_tokens,
+        tools_dir=args.tools_dir,
         verbose=args.verbose,
         on_step=_print_step,
         on_token=stream_print if not args.query else None,

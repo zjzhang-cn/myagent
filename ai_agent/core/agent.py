@@ -28,7 +28,7 @@ from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, StepStatus
 from ai_agent.core.skills import Skill, SkillRegistry, load_skills_from_directory
 from ai_agent.llm.base import BaseLLM, LLMResponse
-from ai_agent.tools.registry import ToolRegistry
+from ai_agent.tools.registry import ToolRegistry, load_tools_from_directory
 from ai_agent.utils.security import SecurityContext, set_security_context, clear_security_context
 from ai_agent.utils.token_utils import estimate_message_tokens, estimate_messages_tokens, truncate_text
 
@@ -248,6 +248,18 @@ class Agent:
             from ai_agent.tools.registry import get_registry
             tool_registry = get_registry()
         self.tool_registry = tool_registry
+
+        # 动态加载自定义工具目录
+        if self.config.tools_dir:
+            tools_dir = os.path.expanduser(self.config.tools_dir)
+            try:
+                dynamic_tools = load_tools_from_directory(tools_dir)
+                for func in dynamic_tools:
+                    self.tool_registry.register_function(func)
+                if dynamic_tools:
+                    logger.info(f"从 {tools_dir} 动态加载了 {len(dynamic_tools)} 个工具")
+            except Exception as e:
+                logger.warning(f"动态加载工具目录失败: {e}")
 
         # 技能注册表
         if skill_registry is None:

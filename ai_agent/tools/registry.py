@@ -2,8 +2,11 @@
 工具注册中心
 """
 
+import importlib.util
 import json
 import logging
+import os
+import sys
 import traceback
 from typing import Any, Callable
 
@@ -101,3 +104,69 @@ def get_registry() -> ToolRegistry:
     if _global_registry is None:
         _global_registry = ToolRegistry()
     return _global_registry
+
+
+def load_tools_from_directory(directory: str) -> list[Callable]:
+    """从目录中动态加载所有 @tool 装饰的 Python 工具模块。
+
+    扫描 directory 下所有 .py 文件（排除 __init__.py 和以 _ 开头的文件），
+    动态导入模块，提取其中所有被 @tool 装饰器标记的函数。
+
+    Args:
+        directory: 工具模块目录路径
+
+    Returns:
+        所有被 @tool 装饰的可调用函数列表
+
+    使用示例:
+        tools = load_tools_from_directory("~/my-tools")
+        for func in tools:
+            registry.register_function(func)
+    """
+    tools: list[Callable] = []
+    directory = os.path.expanduser(directory)
+
+    if not os.path.isdir(directory):
+        logger.warning(f"工具目录不存在: {directory}")
+        return tools
+
+    # 确保目录在 sys.path 中（用于相对导入）
+    parent_dir = os.path.dirname(directory)
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+
+    for fname in sorted(os.listdir(directory)):
+        if not fname.endswith(".py") or fname.startswith("_") or fname == "__init__.py":
+            continue
+
+        fpath = os.path.join(directory, fname)
+        module_name = fname[:-3]  # 去掉 .py
+
+        try:
+            # 动态导入模块
+            spec = importlib.util.spec_from_file_location(
+                f"_dynamic_tool_{module_name}", fpath
+            )
+            if spec is None or spec.loader is None:
+                logger.warning(f"无法加载工具模块: {fpath}")
+                continue
+
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
+            logger.warning(f"加载工具模块失败: {fpath}: {e}")
+            continue
+
+        # 查找模块中所有被 @tool 装饰的函数
+        count = 0
+        for attr_name in dir(module):
+            obj = getattr(module, attr_name)
+            if callable(obj) and hasattr(obj, "_tool_definition"):
+                tools.append(obj)
+                logger.info(f"从文件加载工具: {fname} -> {attr_name}")
+                count += 1
+
+        if count == 0:
+            logger.debug(f"工具模块 {fname} 中未找到 @tool 装饰的函数")
+
+    return tools
