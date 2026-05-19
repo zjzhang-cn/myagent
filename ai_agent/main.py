@@ -278,7 +278,7 @@ def interactive_mode(agent: Agent) -> None:
         if agent.current_plan:
             plan_info = f" | 计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步"
         print(f"🔄 已恢复会话: {resumed['name']} ({saved_at}){plan_info}")
-    print("命令: /quit 退出  /save 保存  /reset 重置  /tools 工具列表  /state 状态管理  /memory 记忆管理")
+    print("命令: /quit 退出  /save 保存  /reset 重置  /tools 工具列表  /skills 技能列表  /state 状态管理  /memory 记忆管理")
     print("=" * 60 + "\n")
 
     while True:
@@ -314,6 +314,18 @@ def interactive_mode(agent: Agent) -> None:
             print()
             continue
 
+        if lowered in ("skills",):
+            skills = agent.skill_registry.list_all()
+            if not skills:
+                print("\n(无已加载的技能)\n")
+            else:
+                print(f"\n已加载的技能 ({len(skills)}):")
+                for s in skills:
+                    deps = f" [依赖: {s.dependencies}]" if s.dependencies else ""
+                    print(f"  • {s.name}: {s.description}{deps}")
+                print()
+            continue
+
         if lowered == "save" or lowered.startswith("save "):
             parts = user_input.split(maxsplit=1)
             if len(parts) > 1 and parts[1].strip():
@@ -335,6 +347,7 @@ def interactive_mode(agent: Agent) -> None:
   /help, /h             显示此帮助
   /save [名称]           保存当前会话（不填名称则自动生成）
   /tools                列出可用工具
+  /skills               列出已加载技能
   /state save <name>    保存当前会话状态
   /state load <name>    加载/切换到指定状态
   /state list           列出所有已保存状态

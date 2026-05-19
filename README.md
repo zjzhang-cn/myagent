@@ -1,19 +1,21 @@
 # AI Agent
 
-基于 OpenAI API 的工具调用型智能 Agent，支持工具调用、任务规划与分解、三层记忆系统、流式输出与实时思考过程显示。
+基于 OpenAI API 的工具调用型智能 Agent，支持工具调用、任务规划与分解、技能系统、三层记忆系统、流式输出与实时思考过程显示。
 
 ## 核心特性
 
 - **Tool Calling** — 支持 LLM 原生 Function Calling + 多格式文本解析（JSON / 函数调用风格）
+- **动态工具加载** — `--tools-dir` 从目录自动加载 `@tool` 装饰的 Python 文件，默认 `~/.ai_agent/tools`
+- **技能系统** — 遵循 Claude Code Skills 规范，基于 Skill.md 目录 + YAML frontmatter，渐进式披露
 - **ReAct 循环** — Think → Act → Observe → Reflect，循环直到任务完成或达到最大迭代次数
 - **流式输出** — 交互模式下实时逐 token 展示 LLM 推理和思考过程（`on_token` / `on_thinking` 回调）
 - **模型推理（think）** — 支持 `--think` 参数，展示支持推理的模型的内部思考过程
 - **并发工具执行** — 同一轮迭代中的多个独立工具调用使用线程池并发执行
-- **任务规划** — 自动评估复杂度，将复杂任务拆解为可执行步骤（支持依赖关系）
+- **任务规划** — 自动评估复杂度，将复杂任务拆解为可执行步骤（支持依赖关系和技能模板）
 - **错误恢复** — 检测工具执行失败，自动分类错误并触发计划重规划（replan）
 - **上下文窗口管理** — CJK 感知的 token 估算，自动裁剪消息以适应模型上下文窗口
 - **安全加固** — 路径沙箱阻止目录遍历和符号链接逃逸，命令白名单拦截危险 Shell 操作
-- **三层记忆** — 短期记忆（对话上下文）+ 工作记忆（任务状态）+ 长期记忆（SQLite 持久化）
+- **三层记忆** — 短期记忆（对话上下文）+ 工作记忆（任务状态）+ 长期记忆（SQLite 持久化 + 语义搜索）
 - **请求日志** — `--log-file` 将 LLM 完整交互记录到日志文件，JSONL 保存原始请求/响应
 
 ## 架构
@@ -24,11 +26,14 @@
                 ▼                        ▼
            Planner                  ToolRegistry
          (任务分解/重规划)         (工具注册与执行)
-                                        │
-                        ┌───────────────┼───────────────┐
-                        ▼               ▼               ▼
-                    安全沙箱         并发执行          错误检测
-                (路径验证+命令白名单) (ThreadPool)   (分类+replan)
+           │        │                    │
+           ▼        ▼        ┌───────────┼───────────┐
+      SkillRegistry   LLM    ▼           ▼           ▼
+      (技能模板匹配)       安全沙箱    并发执行    错误检测
+                          (路径验证)  (ThreadPool) (分类+replan)
+
+动态加载：tools_dir (~/.ai_agent/tools/) → @tool 装饰器 → ToolRegistry
+技能加载：skills_dir (Skill.md 目录) → YAML frontmatter → SkillRegistry
 
 记忆系统：短期记忆(上下文窗口裁剪) + 工作记忆(任务状态) + 长期记忆(SQLite持久化)
 显示系统：on_step / on_token / on_thinking 回调 → 实时展示全过程
@@ -92,6 +97,7 @@ uv run python -m ai_agent.main --list-models
 | `--no-think` | — | 强制禁用模型推理 | 关闭 |
 | `--no-planning` | — | 禁用任务规划 | 关闭（默认启用规划） |
 | `--no-resume` | — | 禁用启动时自动恢复上次会话 | 关闭（默认自动恢复） |
+| `--tools-dir` | — | 自定义工具目录（@tool 装饰的 .py 文件） | `AGENT_TOOLS_DIR` 环境变量 或 `~/.ai_agent/tools` |
 | `--verbose` | `-v` | 显示 DEBUG 级别详细日志 | 关闭 |
 | `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
 | `--state-dir` | — | 会话状态存储目录 | `AGENT_STATE_DIR` 环境变量 或 `~/.ai_agent/sessions` |
@@ -111,6 +117,7 @@ uv run python -m ai_agent.main --list-models
 | `AGENT_TEMPERATURE` | 默认温度（命令行 `--temperature` 优先级更高） |
 | `AGENT_STATE_DIR` | 会话状态存储目录（命令行 `--state-dir` 优先级更高） |
 | `AGENT_MEMORY_PATH` | 长期记忆数据库路径（命令行 `--memory-path` 优先级更高） |
+| `AGENT_TOOLS_DIR` | 自定义工具目录（命令行 `--tools-dir` 优先级更高） |
 | `AGENT_MAX_CONTEXT_TOKENS` | 最大上下文 token 数（命令行 `--max-context-tokens` 优先级更高，默认 65536） |
 | `AGENT_MAX_TOOL_RESULT_CHARS` | 单条工具结果最大字符数（命令行 `--max-tool-result-chars` 优先级更高，默认 32768） |
 | `AGENT_MAX_TOKENS` | LLM 单次输出最大 token 数（命令行 `--max-tokens` 优先级更高，默认 4096） |
@@ -128,6 +135,7 @@ uv run python -m ai_agent.main --list-models
 | `/help`, `/h` | 显示帮助信息 |
 | `/save [名称]` | 保存当前会话状态（不填名称则自动生成） |
 | `/tools` | 列出所有可用工具及参数说明 |
+| `/skills` | 列出所有已加载技能 |
 | `/reset`, `/clear` | 重置 Agent 状态（清空对话历史和计划） |
 | `/quit`, `/exit`, `/q` | 退出交互模式 |
 
@@ -168,6 +176,9 @@ uv run ai-agent --model deepseek-v4-flash
 
 # 启用模型推理显示（需模型支持 think）
 uv run python -m ai_agent.main --think --model deepseek-v4-flash
+
+# 指定自定义工具目录
+uv run python -m ai_agent.main --tools-dir ~/my-tools
 
 # 详细日志模式
 uv run python -m ai_agent.main --model gpt-4o --verbose
@@ -223,6 +234,155 @@ uv run python -m ai_agent.main --no-resume
 # 指定会话存储目录
 uv run python -m ai_agent.main --state-dir ~/my-sessions
 ```
+
+## 自定义工具
+
+### 通过 tools_dir 动态加载（推荐）
+
+将 `@tool` 装饰的 Python 文件放入 `~/.ai_agent/tools/`，Agent 启动时自动加载：
+
+```python
+# ~/.ai_agent/tools/my_tools.py
+from ai_agent.tools.base import tool
+
+@tool(
+    name="get_weather",
+    description="获取指定城市的天气信息",
+    params=[
+        {"name": "city", "type": "string", "description": "城市名称", "required": True},
+    ],
+)
+def get_weather(city: str) -> str:
+    # 实现天气查询逻辑
+    return f"{city}：晴，25°C"
+```
+
+```bash
+# 直接运行，工具自动加载
+uv run ai-agent "北京天气怎么样？"
+
+# 指定其他目录
+uv run ai-agent --tools-dir ~/projects/my-tools "查询天气"
+```
+
+### 通过代码注册
+
+```python
+from ai_agent import Agent, tool
+
+@tool(
+    name="get_weather",
+    description="获取指定城市的天气信息",
+    params=[
+        {"name": "city", "type": "string", "description": "城市名称", "required": True},
+    ],
+)
+def get_weather(city: str) -> str:
+    return f"{city}：晴，25°C"
+
+agent = Agent()
+agent.add_tool(get_weather)
+result = agent.run("北京今天天气怎么样？")
+```
+
+### 通过 load_tools_from_directory 批量加载
+
+```python
+from ai_agent.tools import load_tools_from_directory
+from ai_agent.tools.registry import ToolRegistry
+
+registry = ToolRegistry()
+for func in load_tools_from_directory("~/my-tools"):
+    registry.register_function(func)
+```
+
+## 技能系统
+
+遵循 [Claude Code Skills 规范](https://support.claude.com/en/articles/12512198-how-to-create-custom-skills)，每个技能是一个包含 `Skill.md` 文件的目录。
+
+### 技能目录结构
+
+```
+~/.ai_agent/skills/
+├── research-save/
+│   ├── Skill.md          # YAML frontmatter + Markdown 正文
+│   └── resources/        # 可选资源文件
+└── code-review/
+    └── Skill.md
+```
+
+### Skill.md 格式
+
+```markdown
+---
+name: Research & Save
+description: Search the web for information and save results to a file
+dependencies: python>=3.8
+---
+
+## Instructions
+
+1. Use search_web to find relevant information
+2. Use write_file to save the results
+3. Summarize findings for the user
+```
+
+- `name`：技能名称（最多 64 字符）
+- `description`：技能描述（最多 200 字符），LLM 据此决定何时调用该技能
+- `dependencies`：可选，如 `python>=3.8, pandas>=1.5.0`
+- Markdown 正文：技能详细指令（渐进式披露第二层）
+
+### 使用技能
+
+```python
+from ai_agent import Agent, AgentConfig, Skill, SkillStep
+
+# 方式一：通过 config 内联定义
+config = AgentConfig(
+    skills=[
+        {
+            "name": "code_review",
+            "description": "Review code for bugs and style issues",
+            "trigger_keywords": ["review", "代码审查"],
+            "steps": [
+                {"description": "读取代码文件", "tool_hint": "read_file"},
+                {"description": "分析代码问题并输出报告", "tool_hint": "", "dependencies": [1]},
+            ],
+        }
+    ],
+    # 方式二：从目录加载
+    skills_dir="~/.ai_agent/skills",
+)
+agent = Agent(config=config)
+
+# 方式三：程序化注册
+skill = Skill(
+    name="pdf_processing",
+    description="Extract text, merge, and split PDF files",
+    body="## Instructions\n\n...",
+)
+agent.add_skill(skill)
+```
+
+### 渐进式披露
+
+- **第一层**：技能元数据（name + description）始终注入系统提示词，LLM 据此判断是否需要加载完整内容
+- **第二层**：LLM 通过 `plan_with_skill` 或技能名称匹配加载完整 Markdown 正文
+- 技能之间可以组合使用，多个聚焦的小技能比一个大技能更灵活
+
+## 内置工具
+
+| 工具 | 描述 |
+|------|------|
+| `read_file(path, start_line?, end_line?)` | 读取文件内容（路径受沙箱限制） |
+| `write_file(path, content, mode?)` | 写入文件（路径受沙箱限制） |
+| `list_directory(path, pattern?)` | 列出目录内容（路径受沙箱限制） |
+| `delete_file(path)` | 删除文件（路径受沙箱限制） |
+| `run_shell_command(command, working_dir?, timeout?)` | 执行 Shell 命令（命令白名单 + 路径沙箱） |
+| `search_web(query, max_results?)` | DuckDuckGo 搜索 |
+| `fetch_url(url, max_chars?)` | 抓取网页纯文本 |
+
+额外工具通过 `~/.ai_agent/tools/` 目录自动加载（如 `query_weather`、`query_weather_simple`）。使用 `/tools` 命令查看当前所有可用工具。
 
 ## 编程方式使用
 
@@ -300,18 +460,6 @@ agent = Agent(on_step=on_step)
 result = agent.run("搜索最新科技新闻，保存到文件")
 ```
 
-## 内置工具
-
-| 工具 | 描述 |
-|------|------|
-| `read_file(path, start_line?, end_line?)` | 读取文件内容（路径受沙箱限制） |
-| `write_file(path, content, mode?)` | 写入文件（路径受沙箱限制） |
-| `list_directory(path, pattern?)` | 列出目录内容（路径受沙箱限制） |
-| `delete_file(path)` | 删除文件（路径受沙箱限制） |
-| `run_shell_command(command, working_dir?, timeout?)` | 执行 Shell 命令（命令白名单 + 路径沙箱） |
-| `search_web(query, max_results?)` | DuckDuckGo 搜索 |
-| `fetch_url(url, max_chars?)` | 抓取网页纯文本 |
-
 ## 配置
 
 ```python
@@ -336,6 +484,14 @@ config = AgentConfig(
     enable_planning=True,             # 启用任务规划
     plan_threshold_complexity=3,      # 复杂度 >= 此值时启动规划
     max_replan_attempts=2,            # 失败时最多重新规划次数
+
+    # 技能配置
+    enable_skills=True,               # 启用技能系统
+    skills=[],                        # 内联技能定义列表
+    skills_dir="~/.ai_agent/skills", # 技能文件目录（Skill.md）
+
+    # 工具配置
+    tools_dir="~/.ai_agent/tools",   # 自定义工具目录（@tool 装饰的 .py 文件）
 
     # 上下文窗口管理
     max_context_tokens=65536,         # 最大上下文 token 数，超出自动裁剪
@@ -388,13 +544,14 @@ ai_agent/
 ├── core/
 │   ├── agent.py         # 核心 Agent，ReAct 循环 + 上下文裁剪 + 并发执行 + 错误恢复
 │   ├── memory.py        # 三层记忆系统（ShortTerm/Working/LongTerm）
-│   └── planner.py       # 任务复杂度评估、规划与重规划（replan）
+│   ├── planner.py       # 任务复杂度评估、规划与重规划（replan）
+│   └── skills.py        # 技能系统（Skill/ SkillRegistry/ Skill.md 加载）
 ├── llm/
 │   ├── base.py          # LLM 抽象接口（StreamEvent, LLMResponse）
 │   └── openai.py        # OpenAI SDK 集成（流式 + think + 多 provider 兼容）
 ├── tools/
 │   ├── base.py          # 工具基类 + @tool 装饰器
-│   ├── registry.py      # 工具注册表
+│   ├── registry.py      # 工具注册表 + 动态加载（load_tools_from_directory）
 │   └── builtin/         # 内置工具（受安全模块保护）
 │       ├── file_ops.py
 │       ├── shell.py
@@ -402,6 +559,12 @@ ai_agent/
 └── utils/
     ├── token_utils.py   # Token 估算与文本截断
     └── security.py      # 路径沙箱、命令白名单、安全上下文
+
+~/.ai_agent/
+├── tools/               # 自动加载的自定义工具（weather.py 等）
+├── skills/              # 技能定义目录（Skill.md）
+├── sessions/            # 会话状态存储
+└── long_term_memory.db  # 长期记忆数据库
 ```
 
 ## 运行示例
