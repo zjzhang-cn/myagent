@@ -1199,37 +1199,121 @@ class Agent:
     def _validate_tool_messages(messages: list[dict]) -> list[dict]:
         """验证并清理消息列表中的 tool 消息，确保 API 兼容性。
 
-        OpenAI API 要求每个 tool 消息必须紧跟在 assistant(tool_calls) 消息之后。
-        此方法扫描消息列表，移除没有前置 assistant(tool_calls) 的孤立 tool 消息。
+        OpenAI API 要求：
+        - 每个 tool 消息必须紧跟在 assistant(tool_calls) 消息之后
+        - assistant 的所有 tool_call_id 都必须有对应的 tool 消息
+
+        此方法处理两种异常：
+        1. 孤立 tool — 没有前置 assistant(tool_calls)，直接移除
+        2. assistant tool_calls 与 tool 消息不匹配 — 清理未使用的 tool_call
 
         Returns:
             清理后的消息列表
         """
         cleaned: list[dict] = []
-        orphaned_count = 0
+
+        def _find_prev_assistant() -> dict | None:
+            """从 cleaned 末尾向前查找最近的一个 assistant(tool_calls) 消息"""
+            for m in reversed(cleaned):
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    return m
+            return None
 
         for i, msg in enumerate(messages):
             if msg.get("role") == "tool":
-                # 前一条消息必须是 assistant 且包含 tool_calls
-                prev = cleaned[-1] if cleaned else None
-                if prev and prev.get("role") == "assistant" and prev.get("tool_calls"):
-                    cleaned.append(msg)
-                else:
-                    orphaned_count += 1
+                prev_asst = _find_prev_assistant()
+                if prev_asst is None:
                     logger.warning(
                         f"移除孤立的 tool 消息 (index={i}, "
-                        f"tool_call_id={msg.get('tool_call_id', '?')[:30]})"
+                        f"tool_call_id={msg.get('tool_call_id', '?')[:50]})"
                     )
+                    continue  # drop this tool message
+
+                # 检查该 tool 消息的 tool_call_id 是否匹配某个未处理的 tool_call
+                tc_id = msg.get("tool_call_id", "")
+                matched = any(
+                    tc.get("id") == tc_id
+                    for tc in (prev_asst.get("tool_calls") or [])
+                )
+                if matched:
+                    cleaned.append(msg)
+                else:
+                    logger.warning(
+                        f"移除不匹配的 tool 消息 (index={i}, "
+                        f"tool_call_id={tc_id[:50]})"
+                    )
+                    continue  # drop this tool message
             else:
                 cleaned.append(msg)
 
-        if orphaned_count > 0:
+        # 第二遍：检查 assistant(tool_calls) 是否所有 tool_call_id 都有对应的 tool 响应
+        # 如果某些 tool_call_id 没有响应，从 assistant 的 tool_calls 中移除它们
+        final: list[dict] = []
+        for i, msg in enumerate(cleaned):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                orig_tool_calls = list(msg["tool_calls"])
+                # 收集紧随该消息之后的所有 tool 消息的 tool_call_id
+                responded_ids: set[str] = set()
+                j = i + 1
+                while j < len(cleaned) and cleaned[j].get("role") == "tool":
+                    tid = cleaned[j].get("tool_call_id", "")
+                    if tid:
+                        responded_ids.add(tid)
+                    j += 1
+
+                # 检查是否有 tool_call_id 没有对应的 tool 响应
+                unmatched = [
+                    tc for tc in orig_tool_calls
+                    if tc.get("id") not in responded_ids
+                ]
+                if unmatched:
+                    unmatched_ids = [tc.get("id", "?") for tc in unmatched]
+                    logger.warning(
+                        f"assistant 的 {len(unmatched)} 个 tool_call "
+                        f"缺少对应的 tool 响应 (ids={unmatched_ids})，"
+                        f"已从 tool_calls 中移除"
+                    )
+                    msg["tool_calls"] = [
+                        tc for tc in orig_tool_calls if tc not in unmatched
+                    ]
+                    if not msg["tool_calls"]:
+                        # 所有 tool_calls 都没有响应，转为 plain assistant
+                        logger.warning("agent 的所有 tool_calls 均无响应，转为普通 assistant 消息")
+                        del msg["tool_calls"]
+                final.append(msg)
+            else:
+                final.append(msg)
+
+        # 再次移除孤立的 tool（可能在清理 assistant tool_calls 后产生）
+        result: list[dict] = []
+        for msg in final:
+            if msg.get("role") == "tool":
+                prev_asst = _find_prev_assistant_in_list(result)
+                if prev_asst is None:
+                    logger.warning(
+                        f"清理后仍有孤立 tool 消息 (tool_call_id={msg.get('tool_call_id', '?')[:50]})，已移除"
+                    )
+                    continue
+                result.append(msg)
+            else:
+                result.append(msg)
+
+        total_removed = len(messages) - len(result)
+        if total_removed > 0:
             logger.warning(
-                f"共移除 {orphaned_count} 条孤立的 tool 消息，"
-                f"原始消息数={len(messages)}，清理后={len(cleaned)}"
+                f"共移除/修复 {total_removed} 条异常消息，"
+                f"原始消息数={len(messages)}，清理后={len(result)}"
             )
 
-        return cleaned
+        return result
+
+
+def _find_prev_assistant_in_list(messages: list[dict]) -> dict | None:
+    """从消息列表末尾向前查找最近的一个 assistant(tool_calls) 消息"""
+    for m in reversed(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            return m
+    return None
 
     def _trim_messages(self, messages: list[dict]) -> list[dict]:
         """
