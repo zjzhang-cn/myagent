@@ -1195,6 +1195,42 @@ class Agent:
 
         return groups
 
+    @staticmethod
+    def _validate_tool_messages(messages: list[dict]) -> list[dict]:
+        """验证并清理消息列表中的 tool 消息，确保 API 兼容性。
+
+        OpenAI API 要求每个 tool 消息必须紧跟在 assistant(tool_calls) 消息之后。
+        此方法扫描消息列表，移除没有前置 assistant(tool_calls) 的孤立 tool 消息。
+
+        Returns:
+            清理后的消息列表
+        """
+        cleaned: list[dict] = []
+        orphaned_count = 0
+
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "tool":
+                # 前一条消息必须是 assistant 且包含 tool_calls
+                prev = cleaned[-1] if cleaned else None
+                if prev and prev.get("role") == "assistant" and prev.get("tool_calls"):
+                    cleaned.append(msg)
+                else:
+                    orphaned_count += 1
+                    logger.warning(
+                        f"移除孤立的 tool 消息 (index={i}, "
+                        f"tool_call_id={msg.get('tool_call_id', '?')[:30]})"
+                    )
+            else:
+                cleaned.append(msg)
+
+        if orphaned_count > 0:
+            logger.warning(
+                f"共移除 {orphaned_count} 条孤立的 tool 消息，"
+                f"原始消息数={len(messages)}，清理后={len(cleaned)}"
+            )
+
+        return cleaned
+
     def _trim_messages(self, messages: list[dict]) -> list[dict]:
         """
         裁剪消息列表以适应上下文窗口。
@@ -1356,6 +1392,9 @@ class Agent:
         if self.config.max_context_tokens:
             messages = self._trim_messages(messages)
 
+        # 预检：移除孤立的 tool 消息，防止 API 400 错误
+        messages = self._validate_tool_messages(messages)
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -1384,6 +1423,9 @@ class Agent:
         # 安全检查：裁剪过长消息
         if self.config.max_context_tokens:
             messages = self._trim_messages(messages)
+
+        # 预检：移除孤立的 tool 消息，防止 API 400 错误
+        messages = self._validate_tool_messages(messages)
 
         max_retries = 3
         for attempt in range(max_retries):
