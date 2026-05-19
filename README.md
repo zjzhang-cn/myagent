@@ -98,6 +98,7 @@ uv run python -m ai_agent.main --list-models
 | `--no-planning` | — | 禁用任务规划 | 关闭（默认启用规划） |
 | `--no-resume` | — | 禁用启动时自动恢复上次会话 | 关闭（默认自动恢复） |
 | `--tools-dir` | — | 自定义工具目录（@tool 装饰的 .py 文件） | `AGENT_TOOLS_DIR` 环境变量 或 `~/.ai_agent/tools` |
+| `--skills-dir` | — | 技能定义目录（Skill.md 文件） | `AGENT_SKILLS_DIR` 环境变量 |
 | `--verbose` | `-v` | 显示 DEBUG 级别详细日志 | 关闭 |
 | `--log-file` | — | LLM 交互日志路径（生成 `.log` 和 `.jsonl` 文件） | 无 |
 | `--state-dir` | — | 会话状态存储目录 | `AGENT_STATE_DIR` 环境变量 或 `~/.ai_agent/sessions` |
@@ -118,6 +119,7 @@ uv run python -m ai_agent.main --list-models
 | `AGENT_STATE_DIR` | 会话状态存储目录（命令行 `--state-dir` 优先级更高） |
 | `AGENT_MEMORY_PATH` | 长期记忆数据库路径（命令行 `--memory-path` 优先级更高） |
 | `AGENT_TOOLS_DIR` | 自定义工具目录（命令行 `--tools-dir` 优先级更高） |
+| `AGENT_SKILLS_DIR` | 技能定义目录（命令行 `--skills-dir` 优先级更高） |
 | `AGENT_MAX_CONTEXT_TOKENS` | 最大上下文 token 数（命令行 `--max-context-tokens` 优先级更高，默认 65536） |
 | `AGENT_MAX_TOOL_RESULT_CHARS` | 单条工具结果最大字符数（命令行 `--max-tool-result-chars` 优先级更高，默认 32768） |
 | `AGENT_MAX_TOKENS` | LLM 单次输出最大 token 数（命令行 `--max-tokens` 优先级更高，默认 4096） |

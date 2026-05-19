@@ -52,7 +52,7 @@ class AgentConfig:
     skills: list[dict] = field(default_factory=list)
     """内联技能定义列表，每项为 Skill 的字典表示"""
     skills_dir: str | None = None
-    """技能定义文件目录，启动时自动加载其中的 .json 文件"""
+    """技能定义文件目录，启动时自动加载其中包含 Skill.md 的子目录"""
     enable_skills: bool = True
     """是否启用技能系统"""
 

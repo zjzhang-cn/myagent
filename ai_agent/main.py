@@ -97,6 +97,7 @@ def create_agent(
     max_tool_result_chars: int | None = None,
     max_tokens: int | None = None,
     tools_dir: str | None = None,
+    skills_dir: str | None = None,
     verbose: bool = False,
     on_step: callable = None,
     on_token: callable = None,
@@ -110,6 +111,7 @@ def create_agent(
     state_dir = state_dir or os.environ.get("AGENT_STATE_DIR", "~/.ai_agent/sessions")
     memory_path = memory_path or os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
     tools_dir = tools_dir or os.environ.get("AGENT_TOOLS_DIR")
+    skills_dir = skills_dir or os.environ.get("AGENT_SKILLS_DIR")
     if max_context_tokens is None:
         val = os.environ.get("AGENT_MAX_CONTEXT_TOKENS", "")
         max_context_tokens = int(val) if val else 65536
@@ -133,6 +135,8 @@ def create_agent(
     )
     if tools_dir:
         config.tools_dir = tools_dir
+    if skills_dir:
+        config.skills_dir = skills_dir
 
     llm = OpenAILLM(
         model=model,
@@ -705,6 +709,12 @@ def main():
         help="自定义工具目录，启动时自动加载其中的 @tool 装饰的 Python 文件",
     )
     parser.add_argument(
+        "--skills-dir",
+        default=None,
+        metavar="PATH",
+        help="技能定义目录，启动时自动加载其中的 Skill.md 文件",
+    )
+    parser.add_argument(
         "--no-resume",
         action="store_true",
         help="禁用启动时自动恢复上次会话状态",
@@ -828,6 +838,7 @@ def main():
         max_tool_result_chars=args.max_tool_result_chars,
         max_tokens=args.max_tokens,
         tools_dir=args.tools_dir,
+        skills_dir=args.skills_dir,
         verbose=args.verbose,
         on_step=_print_step,
         on_token=stream_print if not args.query else None,
