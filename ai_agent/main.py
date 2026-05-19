@@ -129,9 +129,10 @@ def create_agent(
         max_context_tokens=max_context_tokens,
         max_tool_result_chars=max_tool_result_chars,
         max_tokens=max_tokens,
-        tools_dir=tools_dir,
         verbose=verbose,
     )
+    if tools_dir:
+        config.tools_dir = tools_dir
 
     llm = OpenAILLM(
         model=model,
