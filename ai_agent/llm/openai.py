@@ -298,7 +298,7 @@ class OpenAILLM(BaseLLM):
             嵌入向量列表，失败返回 None
         """
         candidates = [model] if model else []
-        candidates += ["text-embedding-3-small", "text-embedding-ada-002", self._model]
+        candidates += ["embeddinggemma:latest", "text-embedding-ada-002", self._model]
 
         seen = set()
         for m in candidates:

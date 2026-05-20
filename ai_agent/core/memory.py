@@ -532,6 +532,13 @@ class LongTermMemory:
         self._conn.commit()
         return True
 
+    def clear_all(self) -> int:
+        """删除全部长期记忆，返回删除条数"""
+        count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        self._conn.execute("DELETE FROM memories")
+        self._conn.commit()
+        return count
+
     def remember(self, content: str, importance: int = 3, category: str = "fact") -> int:
         """记住重要信息（智能去重）"""
         # 检查是否已存在相似内容
@@ -552,6 +559,32 @@ class LongTermMemory:
         for e in entries:
             lines.append(f"\n[{e.category}] (重要度:{e.importance}) {e.content}")
         return "\n".join(lines)
+
+    def reindex_all(self) -> tuple[int, int]:
+        """重新为所有记忆计算嵌入向量，返回 (成功数, 失败数)"""
+        if not self._embedding_fn:
+            return 0, 0
+        rows = self._conn.execute("SELECT id, content FROM memories").fetchall()
+        success = 0
+        failed = 0
+        for mem_id, content in rows:
+            try:
+                vector = self._embedding_fn(content)
+                if vector is None:
+                    failed += 1
+                    continue
+                blob = struct.pack(f"{len(vector)}f", *vector)
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO memory_embeddings (memory_id, embedding, dim) "
+                    "VALUES (?, ?, ?)",
+                    (mem_id, blob, len(vector)),
+                )
+                success += 1
+            except Exception as e:
+                logger.warning(f"重新嵌入失败 (id={mem_id}): {e}")
+                failed += 1
+        self._conn.commit()
+        return success, failed
 
     def forget(self, query: str) -> int:
         """遗忘匹配的记忆，返回删除条数"""

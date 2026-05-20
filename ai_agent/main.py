@@ -572,6 +572,21 @@ def interactive_mode(agent: Agent) -> None:
                     print(f"\n未找到包含 \"{query}\" 的记忆\n")
                 print()
 
+            elif cmd == "reindex":
+                if not agent.long_term._embedding_fn:
+                    print("\n⚠️ 未配置嵌入模型，无法重建索引\n")
+                else:
+                    print("\n🔄 正在为所有记忆重新计算嵌入向量...")
+                    success, failed = agent.long_term.reindex_all()
+                    if failed:
+                        print(f"✅ 完成: {success} 成功, {failed} 失败\n")
+                    else:
+                        print(f"✅ 已为 {success} 条记忆重建嵌入向量\n")
+
+            elif cmd == "clear":
+                count = agent.long_term.clear_all()
+                print(f"\n✅ 已删除全部 {count} 条长期记忆\n")
+
             elif cmd == "add" and len(parts) > 2:
                 content = parts[2]
                 import_cat = parts[3] if len(parts) > 3 else "note"
@@ -592,6 +607,8 @@ def interactive_mode(agent: Agent) -> None:
   memory show <id>       查看单条完整内容
   memory delete <id>     删除指定编号的记忆
   memory forget <关键词>  模糊搜索并删除
+  memory reindex         为所有记忆重新计算嵌入向量
+  memory clear           删除全部长期记忆
   memory add <内容> [分类] 手动添加记忆
                 """)
 
