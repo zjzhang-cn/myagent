@@ -27,6 +27,10 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import NestedCompleter
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.styles import Style
 
 from ai_agent.config import AgentConfig
 from ai_agent.core.agent import Agent
@@ -43,6 +47,51 @@ from ai_agent.tools.builtin import (
 from ai_agent.tools.registry import ToolRegistry
 
 logger = logging.getLogger("ai_agent")
+
+# 终端颜色/图标控制
+_use_color = True  # 默认值，在 main() 中根据 --color/--no-color 和 isatty 确定
+
+
+def _icon(emoji: str, fallback: str = "") -> str:
+    """根据 _use_color 返回 emoji 或纯文本替代"""
+    return emoji if _use_color else fallback
+
+
+# 命令 Tab 补齐定义（支持带 / 前缀和不带的两种形式）
+_COMMAND_COMPLETIONS: dict[str, dict | None] = {
+    "state": {
+        "save": None, "load": None, "list": None,
+        "delete": None, "prune": None, "help": None,
+    },
+    "/state": {
+        "save": None, "load": None, "list": None,
+        "delete": None, "prune": None, "help": None,
+    },
+    "memory": {
+        "stats": None, "bycat": None, "list": None,
+        "search": None, "semsearch": None, "ss": None,
+        "cat": None, "show": None, "delete": None,
+        "forget": None, "reindex": None, "clear": None,
+        "add": None, "help": None,
+    },
+    "/memory": {
+        "stats": None, "bycat": None, "list": None,
+        "search": None, "semsearch": None, "ss": None,
+        "cat": None, "show": None, "delete": None,
+        "forget": None, "reindex": None, "clear": None,
+        "add": None, "help": None,
+    },
+    "save": None, "/save": None,
+    "tools": None, "/tools": None,
+    "skills": None, "/skills": None,
+    "reset": None, "/reset": None,
+    "clear": None, "/clear": None,
+    "quit": None, "/quit": None,
+    "exit": None, "/exit": None,
+    "q": None, "/q": None,
+    "help": None, "/help": None,
+    "h": None, "/h": None,
+}
 
 
 def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
@@ -75,7 +124,7 @@ def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
         ))
         handlers.append(file_handler)
         # 同时输出提示到 stderr
-        sys.stderr.write(f"📝 LLM 交互日志: {log_path}\n")
+        sys.stderr.write(f"{_icon('📝', '[LOG]')} LLM 交互日志: {log_path}\n")
 
     logging.basicConfig(
         level=logging.DEBUG if verbose or log_file else logging.WARNING,
@@ -180,12 +229,13 @@ def _print_step(event: str, data: dict) -> None:
     """实时打印 Agent 思考过程"""
     if event == "start":
         _stream_state["started"] = False
-        print(f"\n{'─' * 40}")
+        sep = "─" * 40 if _use_color else "-" * 40
+        print(f"\n{sep}")
     elif event == "planning":
         _stream_state["started"] = False
         steps = data.get("steps", [])
         if steps:
-            print(f"\n📋 任务规划 ({len(steps)} 步):")
+            print(f"\n{_icon('📋', '[Plan]')} 任务规划 ({len(steps)} 步):")
             for s in steps:
                 print(f"   {s['id']}. {s['description']}")
             print()
@@ -205,7 +255,7 @@ def _print_step(event: str, data: dict) -> None:
                 if _stream_state["started"]:
                     print()
                     _stream_state["started"] = False
-                print(f"  💭 [{iteration}] 决定调用: {', '.join(t['name'] for t in tool_calls)}")
+                print(f"  {_icon('💭', '[Think]')} [{iteration}] 决定调用: {', '.join(t['name'] for t in tool_calls)}")
             else:
                 # 原生 function calling：content 为空或纯 JSON
                 if _stream_state["started"]:
@@ -216,35 +266,33 @@ def _print_step(event: str, data: dict) -> None:
                     args = t.get("arguments", {})
                     args_brief = ", ".join(f"{k}={str(v)[:40]}" for k, v in args.items())
                     tool_descs.append(f"{t['name']}({args_brief})" if args_brief else t['name'])
-                print(f"  💭 [{iteration}] 分析后决定调用工具: {', '.join(tool_descs)}")
+                print(f"  {_icon('💭', '[Think]')} [{iteration}] 分析后决定调用工具: {', '.join(tool_descs)}")
         elif content:
             if _stream_state["started"]:
                 print()
                 _stream_state["started"] = False
             if len(content) <= 200:
-                print(f"  💭 [{iteration}] {content}")
+                print(f"  {_icon('💭', '[Think]')} [{iteration}] {content}")
             else:
-                print(f"  💭 [{iteration}] {content[:200]}...")
+                print(f"  {_icon('💭', '[Think]')} [{iteration}] {content[:200]}...")
     elif event == "acting":
         _stream_state["started"] = False
         tool = data.get("tool", "")
         args = data.get("arguments", {})
         args_str = ", ".join(f"{k}={v}" for k, v in args.items())
-        print(f"  🔧 调用: {tool}({args_str})")
+        print(f"  {_icon('🔧', '[Tool]')} 调用: {tool}({args_str})")
     elif event == "observing":
         tool = data.get("tool", "")
         result = data.get("result", "")
         summary = result[:120].replace("\n", " ") + ("..." if len(result) > 120 else "")
-        print(f"  📊 {tool} → {summary}")
+        print(f"  {_icon('📊', '[Result]')} {tool} → {summary}")
     elif event == "done":
         pass  # 最终答案在下面单独打印
-
-
 def _make_stream_printer():
     """创建一个带状态的流式打印回调（共享 _stream_state）"""
     def on_token(token: str) -> None:
         if not _stream_state["started"]:
-            print("\n💭 ", end="", flush=True)
+            print(f"\n{_icon('💭', '[Think]')} ", end="", flush=True)
             _stream_state["started"] = True
         print(token, end="", flush=True)
 
@@ -257,7 +305,7 @@ def _make_thinking_printer():
 
     def on_thinking(token: str) -> None:
         if not state["started"]:
-            print("\n🧠 ", end="", flush=True)
+            print(f"\n{_icon('🧠', '[Think]')} ", end="", flush=True)
             state["started"] = True
         print(token, end="", flush=True)
 
@@ -271,24 +319,44 @@ def interactive_mode(agent: Agent) -> None:
     if agent.config.auto_resume:
         resumed = agent.resume_last_session()
 
-    print("\n" + "=" * 60)
-    print(f"🤖 AI Agent (模型: {agent.llm.model_name})")
-    print(f"📦 可用工具: {len(agent.tool_registry.list_tools())} 个")
-    print(f"🧠 规划: {'启用' if agent.config.enable_planning else '关闭'}")
+    sep = "=" * 60 if _use_color else "-" * 60
+    print(f"\n{sep}")
+    print(f"{_icon('🤖', '[AI Agent]')} AI Agent (模型: {agent.llm.model_name})")
+    print(f"{_icon('📦', '[Tools]')} 可用工具: {len(agent.tool_registry.list_tools())} 个")
+    print(f"{_icon('🧠', '[Plan]')} 规划: {'启用' if agent.config.enable_planning else '关闭'}")
     if resumed:
         saved_at = resumed.get("saved_at", "")[:19]
         model = resumed.get("model", "")
         plan_info = ""
         if agent.current_plan:
             plan_info = f" | 计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步"
-        print(f"🔄 已恢复会话: {resumed['name']} ({saved_at}){plan_info}")
-    print("命令: /quit 退出  /save 保存  /reset 重置  /tools 工具列表  /skills 技能列表  /state 状态管理  /memory 记忆管理")
-    print("=" * 60 + "\n")
+        print(f"{_icon('🔄', '[Resumed]')} 已恢复会话: {resumed['name']} ({saved_at}){plan_info}")
+    print(f"命令: /quit 退出  /save 保存  /reset 重置  /tools 工具列表  /skills 技能列表  /state 状态管理  /memory 记忆管理")
+    print(f"{sep}\n")
+
+    # 设置 prompt_toolkit 会话
+    history_path = os.path.expanduser("~/.ai_agent/history")
+    os.makedirs(os.path.dirname(history_path), exist_ok=True)
+    session = PromptSession(history=FileHistory(history_path))
+    completer = NestedCompleter.from_nested_dict(_COMMAND_COMPLETIONS)
+    prompt_style = Style.from_dict({
+        "prompt": "#00aa00 bold",
+    }) if _use_color else None
+    prompt_msg = [("class:prompt", "👤 你: ")] if _use_color else "You: "
 
     while True:
         try:
-            user_input = input("👤 你: ").strip()
-        except (EOFError, KeyboardInterrupt):
+            user_input = session.prompt(
+                prompt_msg,
+                completer=completer,
+                style=prompt_style,
+            ).strip()
+        except KeyboardInterrupt:
+            # Ctrl+C — 取消当前输入，不退出
+            print(" (取消输入，Ctrl+D 退出)")
+            continue
+        except EOFError:
+            # Ctrl+D — 退出
             print("\n再见！")
             break
 
@@ -307,14 +375,14 @@ def interactive_mode(agent: Agent) -> None:
 
         if lowered in ("reset", "clear"):
             agent.reset()
-            print("✅ Agent 已重置")
+            print(f"{_icon('✅', '[OK]')} Agent 已重置")
             continue
 
         if lowered in ("tools",):
             print("\n可用工具：")
             for td in agent.tool_registry.list_definitions():
                 params = ", ".join(p.name for p in td.parameters)
-                print(f"  • {td.name}({params}): {td.description}")
+                print(f"  {_icon('•', '*')} {td.name}({params}): {td.description}")
             print()
             continue
 
@@ -326,7 +394,7 @@ def interactive_mode(agent: Agent) -> None:
                 print(f"\n已加载的技能 ({len(skills)}):")
                 for s in skills:
                     deps = f" [依赖: {s.dependencies}]" if s.dependencies else ""
-                    print(f"  • {s.name}: {s.description}{deps}")
+                    print(f"  {_icon('•', '*')} {s.name}: {s.description}{deps}")
                 print()
             continue
 
@@ -340,13 +408,13 @@ def interactive_mode(agent: Agent) -> None:
                 name = f"manual_{path_hash}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
             try:
                 fpath = agent.save_state(name)
-                print(f"\n✅ 会话已保存: {name}\n   {fpath}\n")
+                print(f"\n{_icon('✅', '[OK]')} 会话已保存: {name}\n   {fpath}\n")
             except Exception as e:
-                print(f"\n❌ 保存失败: {e}\n")
+                print(f"\n{_icon('❌', '[ERROR]')} 保存失败: {e}\n")
             continue
 
         if lowered in ("help", "h"):
-            print("""
+            print(f"""
 可用命令:
   /help, /h             显示此帮助
   /save [名称]           保存当前会话（不填名称则自动生成）
@@ -372,9 +440,9 @@ def interactive_mode(agent: Agent) -> None:
                 name = parts[2]
                 try:
                     fpath = agent.save_state(name)
-                    print(f"\n✅ 状态已保存: {fpath}\n")
+                    print(f"\n{_icon('✅', '[OK]')} 状态已保存: {fpath}\n")
                 except Exception as e:
-                    print(f"\n❌ 保存失败: {e}\n")
+                    print(f"\n{_icon('❌', '[ERROR]')} 保存失败: {e}\n")
 
             elif cmd == "load" and len(parts) > 2:
                 name = parts[2]
@@ -383,9 +451,9 @@ def interactive_mode(agent: Agent) -> None:
                     plan_info = ""
                     if agent.current_plan:
                         plan_info = f" (计划: {agent.current_plan.completed_steps}/{agent.current_plan.total_steps} 步)"
-                    print(f"\n✅ 状态已加载: {name}{plan_info}\n")
+                    print(f"\n{_icon('✅', '[OK]')} 状态已加载: {name}{plan_info}\n")
                 else:
-                    print(f"\n❌ 未找到状态: {name}\n")
+                    print(f"\n{_icon('❌', '[ERROR]')} 未找到状态: {name}\n")
 
             elif cmd == "list":
                 states = agent.list_states()
@@ -393,26 +461,28 @@ def interactive_mode(agent: Agent) -> None:
                     print("\n暂无已保存的状态。\n")
                 else:
                     auto_count = sum(1 for s in states if s.get("auto_snapshot"))
-                    print(f"\n已保存的状态 ({len(states)} 个"
-                          + f"，含 {auto_count} 个自动快照" if auto_count else ")"
-                          + (")" if not auto_count else ""))
+                    header = f"\n已保存的状态 ({len(states)} 个"
+                    if auto_count:
+                        header += f"，含 {auto_count} 个自动快照"
+                    header += ")"
+                    print(header)
                     print("-" * 60)
                     for s in states:
-                        prefix = "  🤖" if s.get("auto_snapshot") else "  📁"
+                        prefix = "  [A]" if s.get("auto_snapshot") else "  [M]"
                         print(f"{prefix} {s['name']}")
                         if s.get("cwd"):
-                            print(f"     📂 {s['cwd']}")
+                            print(f"     cwd: {s['cwd']}")
                         if s.get("saved_at"):
                             print(f"     保存: {s['saved_at'][:19]}")
-                        parts = []
+                        meta_parts = []
                         if s.get("model"):
-                            parts.append(s["model"])
+                            meta_parts.append(s["model"])
                         if s.get("agent_state"):
-                            parts.append(s["agent_state"])
+                            meta_parts.append(s["agent_state"])
                         if s.get("schema_version"):
-                            parts.append(f"v{s['schema_version']}")
-                        if parts:
-                            print(f"     {' | '.join(parts)}")
+                            meta_parts.append(f"v{s['schema_version']}")
+                        if meta_parts:
+                            print(f"     {' | '.join(meta_parts)}")
                         print()
                 print()
 
@@ -420,9 +490,9 @@ def interactive_mode(agent: Agent) -> None:
                 name = parts[2]
                 success = agent.delete_state(name)
                 if success:
-                    print(f"\n✅ 已删除状态: {name}\n")
+                    print(f"\n{_icon('✅', '[OK]')} 已删除状态: {name}\n")
                 else:
-                    print(f"\n❌ 未找到状态: {name}\n")
+                    print(f"\n{_icon('❌', '[ERROR]')} 未找到状态: {name}\n")
 
             elif cmd == "help":
                 print("""
@@ -441,7 +511,7 @@ def interactive_mode(agent: Agent) -> None:
                     if s.get("auto_snapshot"):
                         if agent.delete_state(s["name"]):
                             pruned += 1
-                print(f"\n🧹 已清理 {pruned} 个自动快照\n")
+                print(f"\n{_icon('🧹', '[Clean]')} 已清理 {pruned} 个自动快照\n")
 
             else:
                 print(f"\n未知子命令: {cmd}，可用命令: save, load, list, delete, help\n")
@@ -464,7 +534,7 @@ def interactive_mode(agent: Agent) -> None:
                         print(f"  [{cat}] ({count} 条):")
                         for e in entries:
                             created = e.created_at[:10] if len(e.created_at) > 10 else e.created_at
-                            print(f"    [#{e.id}] ★{e.importance}  {created}")
+                            print(f"    [#{e.id}] *{e.importance}  {created}")
                             short = e.content[:80].replace("\n", " ")
                             print(f"          {short}")
                         if count > 10:
@@ -482,7 +552,7 @@ def interactive_mode(agent: Agent) -> None:
                     print("-" * 60)
                     for e in entries:
                         created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
-                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"  [#{e.id}] [{e.category}] *{e.importance}")
                         print(f"        {created}")
                         print(f"        {e.content[:200]}")
                         print()
@@ -498,7 +568,7 @@ def interactive_mode(agent: Agent) -> None:
                     print("-" * 60)
                     for e in entries:
                         created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
-                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"  [#{e.id}] [{e.category}] *{e.importance}")
                         print(f"        {created}")
                         print(f"        {e.content[:200]}")
                         print()
@@ -514,7 +584,7 @@ def interactive_mode(agent: Agent) -> None:
                     print("-" * 60)
                     for entry, score in results:
                         created = entry.created_at[:19] if len(entry.created_at) > 19 else entry.created_at
-                        print(f"  [#{entry.id}] [{entry.category}] ★{entry.importance} 相似度:{score:.3f}")
+                        print(f"  [#{entry.id}] [{entry.category}] *{entry.importance}  相似度:{score:.3f}")
                         print(f"        {created}")
                         print(f"        {entry.content[:200]}")
                         print()
@@ -530,7 +600,7 @@ def interactive_mode(agent: Agent) -> None:
                     print("-" * 60)
                     for e in entries:
                         created = e.created_at[:19] if len(e.created_at) > 19 else e.created_at
-                        print(f"  [#{e.id}] ★{e.importance}  {created}")
+                        print(f"  [#{e.id}] *{e.importance}  {created}")
                         print(f"        {e.content[:200]}")
                         print()
                 print()
@@ -540,7 +610,7 @@ def interactive_mode(agent: Agent) -> None:
                     mem_id = int(parts[2])
                     entry = agent.long_term.get(mem_id)
                     if entry:
-                        print(f"\n[#{entry.id}] {entry.category}  ★重要度 {entry.importance}")
+                        print(f"\n[#{entry.id}] {entry.category}  重要度 {entry.importance}")
                         print(f"  创建: {entry.created_at}")
                         print(f"  更新: {entry.updated_at}")
                         print(f"  内容: {entry.content}")
@@ -556,7 +626,7 @@ def interactive_mode(agent: Agent) -> None:
                     entry = agent.long_term.get(mem_id)
                     if entry:
                         agent.long_term.delete(mem_id)
-                        print(f"\n✅ 已删除记忆 #{mem_id}: {entry.content[:80]}...\n")
+                        print(f"\n{_icon('✅', '[OK]')} 已删除记忆 #{mem_id}: {entry.content[:80]}...\n")
                     else:
                         print(f"\n未找到编号为 {mem_id} 的记忆。\n")
                 except ValueError:
@@ -567,31 +637,31 @@ def interactive_mode(agent: Agent) -> None:
                 query = parts[2]
                 count = agent.long_term.forget(query)
                 if count > 0:
-                    print(f"\n✅ 已遗忘 {count} 条包含 \"{query}\" 的记忆\n")
+                    print(f"\n{_icon('✅', '[OK]')} 已遗忘 {count} 条包含 \"{query}\" 的记忆\n")
                 else:
                     print(f"\n未找到包含 \"{query}\" 的记忆\n")
                 print()
 
             elif cmd == "reindex":
                 if not agent.long_term._embedding_fn:
-                    print("\n⚠️ 未配置嵌入模型，无法重建索引\n")
+                    print(f"\n{_icon('⚠️', '[WARN]')} 未配置嵌入模型，无法重建索引\n")
                 else:
-                    print("\n🔄 正在为所有记忆重新计算嵌入向量...")
+                    print(f"\n{_icon('🔄', '[Busy]')} 正在为所有记忆重新计算嵌入向量...")
                     success, failed = agent.long_term.reindex_all()
                     if failed:
-                        print(f"✅ 完成: {success} 成功, {failed} 失败\n")
+                        print(f"{_icon('✅', '[OK]')} 完成: {success} 成功, {failed} 失败\n")
                     else:
-                        print(f"✅ 已为 {success} 条记忆重建嵌入向量\n")
+                        print(f"{_icon('✅', '[OK]')} 已为 {success} 条记忆重建嵌入向量\n")
 
             elif cmd == "clear":
                 count = agent.long_term.clear_all()
-                print(f"\n✅ 已删除全部 {count} 条长期记忆\n")
+                print(f"\n{_icon('✅', '[OK]')} 已删除全部 {count} 条长期记忆\n")
 
             elif cmd == "add" and len(parts) > 2:
                 content = parts[2]
                 import_cat = parts[3] if len(parts) > 3 else "note"
                 agent.long_term.add(content=content, category=import_cat)
-                print(f"\n✅ 已添加记忆 [{import_cat}]: {content[:80]}...\n")
+                print(f"\n{_icon('✅', '[OK]')} 已添加记忆 [{import_cat}]: {content[:80]}...\n")
                 print()
 
             elif cmd == "help":
@@ -623,7 +693,7 @@ def interactive_mode(agent: Agent) -> None:
                     print(f"\n最近 {len(entries)} 条:")
                     print("-" * 40)
                     for e in entries:
-                        print(f"  [#{e.id}] [{e.category}] ★{e.importance}")
+                        print(f"  [#{e.id}] [{e.category}] *{e.importance}")
                         print(f"    {e.content[:150]}")
                         print()
                 print()
@@ -643,8 +713,9 @@ def interactive_mode(agent: Agent) -> None:
             print()
             _stream_state["started"] = False
 
-        print(f"\n{'─' * 40}")
-        print(f"✅ Agent: {result.answer}")
+        rule = "─" * 40 if _use_color else "-" * 40
+        print(f"\n{rule}")
+        print(f"{_icon('✅', '[OK]')} Agent: {result.answer}")
         print(f"   (耗时 {result.elapsed_seconds:.1f}s, {result.iterations} 轮迭代)")
         if result.plan:
             print(f"   (计划: {result.plan.completed_steps}/{result.plan.total_steps} 步完成)")
@@ -793,6 +864,18 @@ def main():
         metavar="N",
         help="LLM 单次输出最大 token 数（默认 4096，也可通过 AGENT_MAX_TOKENS 环境变量设置）",
     )
+    parser.add_argument(
+        "--color",
+        action="store_true",
+        default=None,
+        help="强制启用彩色/emoji 输出",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        default=None,
+        help="禁用彩色/emoji 输出（适合 CI/管道场景）",
+    )
 
     args = parser.parse_args()
 
@@ -829,7 +912,7 @@ def main():
     if args.log_file:
         log_path = Path(args.log_file)
         response_log_path = str(log_path.with_suffix(".jsonl"))
-        sys.stderr.write(f"📝 原始 LLM 响应: {response_log_path}\n")
+        sys.stderr.write(f"{_icon('📝', '[LOG]')} 原始 LLM 响应: {response_log_path}\n")
 
     if args.list_models:
         list_models(
@@ -863,6 +946,15 @@ def main():
         response_log_path=response_log_path,
         enable_thinking=enable_thinking,
     )
+
+    # 颜色模式: --no-color 优先, --color 其次, 默认自动检测 tty
+    global _use_color
+    if args.no_color:
+        _use_color = False
+    elif args.color:
+        _use_color = True
+    else:
+        _use_color = sys.stdout.isatty()
 
     if args.no_planning:
         agent.config.enable_planning = False
