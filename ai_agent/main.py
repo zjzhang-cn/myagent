@@ -23,6 +23,7 @@ import argparse
 import datetime
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -38,7 +39,10 @@ from ai_agent.llm.openai import OpenAILLM
 from ai_agent.tools.builtin import (
     delete_file,
     fetch_url,
+    kill_process,
     list_directory,
+    list_processes,
+    poll_process,
     read_file,
     run_shell_command,
     search_web,
@@ -192,6 +196,9 @@ def create_agent(
         run_shell_command,
         search_web,
         fetch_url,
+        kill_process,
+        list_processes,
+        poll_process,
     ]:
         registry.register_function(func)
 
@@ -694,7 +701,11 @@ def interactive_mode(agent: Agent) -> None:
             thinking_p, thinking_s = _make_thinking_printer()
             agent.on_thinking = thinking_p
 
-        result = agent.run(user_input)
+        sig_handler = signal.signal(signal.SIGINT, lambda _sig, _frame: agent.interrupt())
+        try:
+            result = agent.run(user_input)
+        finally:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
 
         # 流式结束后换行
         if _stream_state["started"]:
@@ -703,7 +714,10 @@ def interactive_mode(agent: Agent) -> None:
 
         rule = "─" * 40 if _use_color else "-" * 40
         print(f"\n{rule}")
-        print(f"{_icon('✅', '[OK]')} Agent: {result.answer}")
+        if agent._interrupted:
+            print(f"{_icon('⚠️', '[INTERRUPTED]')} Agent: {result.answer}")
+        else:
+            print(f"{_icon('✅', '[OK]')} Agent: {result.answer}")
         print(f"   (耗时 {result.elapsed_seconds:.1f}s, {result.iterations} 轮迭代)")
         if result.plan:
             print(f"   (计划: {result.plan.completed_steps}/{result.plan.total_steps} 步完成)")
@@ -957,11 +971,18 @@ def main():
         # 单次查询也使用流式
         _stream_state["started"] = False
         agent.on_token = _make_stream_printer()
-        result = agent.run(args.query)
+        signal.signal(signal.SIGINT, lambda _sig, _frame: agent.interrupt())
+        try:
+            result = agent.run(args.query)
+        finally:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
         if _stream_state["started"]:
             print()
             _stream_state["started"] = False
-        print(f"\n{result.answer}")
+        if agent._interrupted:
+            print(f"\n{_icon('⚠️', '[INTERRUPTED]')} {result.answer}")
+        else:
+            print(f"\n{result.answer}")
         print(f"\n(耗时 {result.elapsed_seconds:.1f}s, {result.iterations} 轮)")
     else:
         # 交互模式

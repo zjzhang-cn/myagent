@@ -322,6 +322,7 @@ class Agent:
         self._replan_count: int = 0  # 当前任务中已重新规划次数
         self._iteration_count: int = 0  # 当前 run 中的迭代计数
         self._no_toolcall_streak: int = 0  # 连续无工具调用次数
+        self._interrupted: bool = False  # SIGINT 中断标志
         self.on_step = on_step
         self.on_token = on_token
         self.on_thinking = on_thinking
@@ -347,6 +348,7 @@ class Agent:
         self._replan_count = 0  # 重置重新规划计数
         self._iteration_count = 0  # 重置迭代计数
         self._no_toolcall_streak = 0  # 重置连续无工具调用计数
+        self._interrupted = False  # 重置中断标志
         self.short_term.add_user(user_input)
         self.state = AgentState.IDLE
 
@@ -388,6 +390,17 @@ class Agent:
                     self.save_state(auto_name)
                 except Exception as e:
                     logger.warning(f"自动快照失败: {e}")
+
+            # 检查中断信号
+            if self._interrupted:
+                logger.info("收到中断信号，安全停止")
+                last_resp = locals().get("response")
+                final_answer = (
+                    last_resp.content if last_resp and last_resp.content
+                    else "任务已被用户中断。"
+                )
+                self._emit("done", {"answer": final_answer})
+                break
 
             # 2a. 思考阶段
             self.state = AgentState.THINKING
@@ -776,6 +789,10 @@ class Agent:
         self.tool_registry.register_function(use_skill)
         logger.debug("use_skill 工具已注册")
 
+    def interrupt(self) -> None:
+        """发送中断信号，将在下次迭代前安全停止"""
+        self._interrupted = True
+
     def clear_memory(self) -> None:
         """清除短期和工作记忆"""
         self.short_term.clear()
@@ -786,6 +803,12 @@ class Agent:
         """完全重置 Agent"""
         self.clear_memory()
         self.state = AgentState.IDLE
+        # 终止所有后台进程
+        try:
+            from ai_agent.tools.builtin.processes import get_process_manager
+            get_process_manager().kill_all()
+        except Exception:
+            pass
 
     # ----------------------------------------------------------
     # 状态持久化管理
