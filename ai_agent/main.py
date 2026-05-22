@@ -59,20 +59,9 @@ def _icon(emoji: str, fallback: str = "") -> str:
 
 # 命令 Tab 补齐定义（支持带 / 前缀和不带的两种形式）
 _COMMAND_COMPLETIONS: dict[str, dict | None] = {
-    "state": {
-        "save": None, "load": None, "list": None,
-        "delete": None, "prune": None, "help": None,
-    },
     "/state": {
         "save": None, "load": None, "list": None,
         "delete": None, "prune": None, "help": None,
-    },
-    "memory": {
-        "stats": None, "bycat": None, "list": None,
-        "search": None, "semsearch": None, "ss": None,
-        "cat": None, "show": None, "delete": None,
-        "forget": None, "reindex": None, "clear": None,
-        "add": None, "help": None,
     },
     "/memory": {
         "stats": None, "bycat": None, "list": None,
@@ -81,16 +70,13 @@ _COMMAND_COMPLETIONS: dict[str, dict | None] = {
         "forget": None, "reindex": None, "clear": None,
         "add": None, "help": None,
     },
-    "save": None, "/save": None,
-    "tools": None, "/tools": None,
-    "skills": None, "/skills": None,
-    "reset": None, "/reset": None,
-    "clear": None, "/clear": None,
-    "quit": None, "/quit": None,
-    "exit": None, "/exit": None,
-    "q": None, "/q": None,
-    "help": None, "/help": None,
-    "h": None, "/h": None,
+    "/save": None,
+    "/tools": None,
+    "/skills": None,
+    "/reset": None,
+    "/quit": None,
+    "/exit": None,
+    "/help": None,
 }
 
 
@@ -363,11 +349,13 @@ def interactive_mode(agent: Agent) -> None:
         if not user_input:
             continue
 
-        # 以 / 开头的输入视为命令
+        # 只有以 / 开头的输入才是命令，其他直接交给 Agent
         if user_input.startswith("/"):
             user_input = user_input[1:]
-
-        lowered = user_input.lower()
+            lowered = user_input.lower()
+        else:
+            # 非命令输入直接交给 Agent 处理
+            lowered = ""
 
         if lowered in ("quit", "exit", "q"):
             print("再见！")
