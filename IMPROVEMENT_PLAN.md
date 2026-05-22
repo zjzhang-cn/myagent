@@ -2,7 +2,7 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-16 (测试覆盖完成)
+最后更新: 2026-05-22 (CLI 体验改进、流式中断与进程管理完成)
 
 ---
 
@@ -96,13 +96,20 @@
 
 ## 优先级 P2 — 功能增强
 
-### 9. 流式中断与进程管理
+### 9. 流式中断与进程管理  ✅ 已完成 (2026-05-22)
 
 - **问题**: Shell 工具无进程管理，流式输出无中断机制
 - **方案**:
   - Shell 工具返回 `pid`，新增 `kill_process(pid)`、`list_processes()` 工具
   - 支持异步执行 + 轮询结果
   - 流式输出支持 `SIGINT` 中断
+- **实现**:
+  - `ai_agent/tools/builtin/processes.py` — ProcessManager 单例、后台线程输出收集
+  - `run_shell_command(background=True)` — Popen 异步执行，返回 PID 和轮询提示
+  - 新增 `poll_process(pid)` / `list_processes()` / `kill_process(pid)` 工具
+  - Agent 新增 `_interrupted` 标志 + `interrupt()` 方法
+  - `main.py` 在 `agent.run()` 前后安装/恢复 SIGINT 处理器
+  - `reset()` 时自动终止所有追踪的后台进程
 
 ### 10. 计划器增强  ✅ 已完成 (2026-05-15)
 
@@ -136,13 +143,20 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
   - 相似超过 0.85 时合并或更新而非新建
   - 低重要度记忆（<=2）定期自动归档或删除
 
-### 13. CLI 体验改进
+### 13. CLI 体验改进  ✅ 已完成 (2026-05-22)
 
 - **问题**: 交互模式缺少历史记录、Tab 补齐、颜色控制等基础能力
 - **方案**:
   - 引入 `prompt_toolkit` 或 `readline` 实现上下键翻历史、行内编辑
   - `/state` `/memory` 子命令 Tab 自动补齐
   - `--color` / `--no-color` 参数控制终端输出样式（方便 CI/管道场景）
+- **实现**:
+  - `prompt_toolkit.PromptSession` + `FileHistory` — 持久化历史，行内编辑
+  - `NestedCompleter` — `/state` `/memory` 子命令 Tab 补齐
+  - `_icon()` / `_use_color` — 全局 emoji/颜色开关，自动检测 isatty
+  - `--color` / `--no-color` CLI 参数
+  - `Ctrl+C` 取消输入（不退出），`Ctrl+D` 退出
+  - 命令必须以 `/` 为前缀，无前缀输入直接交给 Agent
 
 ### 14. 搜索引擎 Provider 冗余
 
@@ -160,10 +174,15 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
   - 配置项 `enable_vision` 控制启用（需模型支持）
   - 图片路径同样受路径沙箱保护
 
-### 16. Skills 技能系统
+### 16. Skills 技能系统  ✅ 已完成 (2026-05-19)
 
 - **问题**: Agent 只有工具调用（tool calling），没有可复用的"技能"（skills）。每次执行类似任务（如代码审查、文档生成、搜索总结）都需要用户从零描述步骤，无法像 Claude Code 的 `/review` 一样一键触发
 - **参考**: 遵循 Claude Code Skills 规范设计
+- **实现**:
+  - `ai_agent/core/skills.py` — Skill/SkillRegistry/SkillStep、Skill.md YAML frontmatter 解析
+  - 渐进式披露：元数据注入系统提示词 → LLM 调用 `use_skill` 工具加载完整内容
+  - `skills_dir` 配置项、`--skills-dir` CLI 参数
+  - 示例技能：code-explainer、research-save、info-fetcher
 - **方案**:
   - **技能定义**: 每个 skill 为一个 Markdown 文件，包含 YAML frontmatter 元数据和步骤内容
     ```yaml
@@ -228,9 +247,9 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 
 ## 实施建议
 
-1. **P0 先做** — 测试覆盖 ✅。下一步推荐错误恢复差异化（改动小收益高）
+1. **P0 先做** — 测试覆盖 ✅。错误恢复差异化（改动小收益高，下一个推荐）
 2. **P1 选做** — 多 LLM 后端的成本/收益最高；API Server 看是否需要嵌入现有系统
-3. **P2 按需** — Token 监控（20 行）、首次运行引导（提升首次体验）容易做；搜索 Provider 和多模态扩展取决于使用场景
+3. **P2 按需** — Skills ✅、CLI 改进 ✅、流式中断 ✅ 已完成。Token 监控（20 行）、首次运行引导（提升首次体验）容易做；搜索 Provider 和多模态扩展取决于使用场景
 4. **P3 穿插** — ruff + pre-commit + CI 可一次搞定，后续每轮自动保持代码质量。文档改进可在其他任务间隙顺手推进
 
 ---
