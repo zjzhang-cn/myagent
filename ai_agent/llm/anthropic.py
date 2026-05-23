@@ -151,6 +151,7 @@ class AnthropicLLM(BaseLLM):
 
         full_content = ""
         full_thinking = ""
+        thinking_signature = ""
         tool_use_blocks: dict[int, dict] = {}
         usage: dict = {}
         stop_reason = "end_turn"
@@ -181,6 +182,8 @@ class AnthropicLLM(BaseLLM):
                         elif delta.type == "thinking_delta":
                             full_thinking += delta.thinking
                             yield StreamEvent(type="thinking", content=delta.thinking)
+                        elif delta.type == "signature_delta":
+                            thinking_signature += delta.signature
 
                     elif event.type == "content_block_stop":
                         pass
@@ -245,6 +248,7 @@ class AnthropicLLM(BaseLLM):
         self._save_raw_response(LLMResponse(
             content=full_content.strip(),
             thinking=full_thinking.strip(),
+            thinking_signature=thinking_signature,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,
@@ -376,9 +380,17 @@ class AnthropicLLM(BaseLLM):
         content_blocks: list[dict] = []
         text_content = msg.get("content", "")
 
-        # 将 reasoning_content 前置到文本内容（Anthropic 不接受 thinking 块在历史消息中）
+        # 如果有 reasoning_signature，创建正确的 thinking 块（Anthropic 扩展思考要求）
         reasoning = msg.get("reasoning_content", "") or msg.get("thinking", "")
-        if reasoning:
+        reasoning_signature = msg.get("reasoning_signature", "")
+        if reasoning and reasoning_signature:
+            content_blocks.append({
+                "type": "thinking",
+                "thinking": reasoning,
+                "signature": reasoning_signature,
+            })
+        elif reasoning:
+            # 无签名时，将推理内容前置到文本（兼容 OpenAI/DeepSeek 的 reasoning_content）
             text_content = f"[推理]\n{reasoning}\n\n{text_content}" if text_content else f"[推理]\n{reasoning}"
 
         if text_content:
@@ -504,6 +516,7 @@ class AnthropicLLM(BaseLLM):
         """解析 Anthropic API 响应为 LLMResponse"""
         content_parts: list[str] = []
         thinking_parts: list[str] = []
+        thinking_signature = ""
         tool_calls: list[dict] = []
 
         for block in response.content:
@@ -517,6 +530,7 @@ class AnthropicLLM(BaseLLM):
                 })
             elif block.type == "thinking":
                 thinking_parts.append(block.thinking)
+                thinking_signature = getattr(block, "signature", "") or ""
 
         # 映射 Anthropic stop_reason → OpenAI finish_reason
         reason = getattr(response, "stop_reason", "end_turn") or "end_turn"
@@ -539,6 +553,7 @@ class AnthropicLLM(BaseLLM):
         return LLMResponse(
             content="\n".join(content_parts).strip(),
             thinking="\n".join(thinking_parts).strip() if thinking_parts else "",
+            thinking_signature=thinking_signature,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,

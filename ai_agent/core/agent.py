@@ -537,6 +537,7 @@ class Agent:
                         response.content or "",
                         tool_calls=openai_tool_calls,
                         reasoning_content=response.thinking or "",
+                        reasoning_signature=getattr(response, 'thinking_signature', '') or "",
                     )
 
                     # --- 回调：行动（所有工具） ---

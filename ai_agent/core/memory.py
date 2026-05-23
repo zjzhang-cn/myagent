@@ -39,9 +39,12 @@ class Message:
         if self.role == "assistant":
             if self.metadata.get("tool_calls"):
                 d["tool_calls"] = self.metadata["tool_calls"]
-            # DeepSeek 等推理模型要求 reasoning_content 原样传回
+            # 推理模型要求 reasoning_content 原样传回
             if self.metadata.get("reasoning_content"):
                 d["reasoning_content"] = self.metadata["reasoning_content"]
+            # Anthropic extended thinking 要求 signature 原样传回
+            if self.metadata.get("reasoning_signature"):
+                d["reasoning_signature"] = self.metadata["reasoning_signature"]
         if self.role == "tool" and self.metadata.get("tool_call_id"):
             d["tool_call_id"] = self.metadata["tool_call_id"]
         return d
@@ -86,11 +89,13 @@ class ShortTermMemory:
         self.add("user", content)
 
     def add_assistant(self, content: str, tool_calls: list[dict] | None = None,
-                      reasoning_content: str = "") -> None:
-        """添加 assistant 消息，可附带 tool_calls 和 reasoning_content"""
+                      reasoning_content: str = "", reasoning_signature: str = "") -> None:
+        """添加 assistant 消息，可附带 tool_calls、reasoning_content 和 reasoning_signature"""
         kwargs = {"tool_calls": tool_calls or []}
         if reasoning_content:
             kwargs["reasoning_content"] = reasoning_content
+        if reasoning_signature:
+            kwargs["reasoning_signature"] = reasoning_signature
         self.add("assistant", content, **kwargs)
 
     def add_tool_result(self, tool_name: str, result: str, tool_call_id: str = "") -> None:

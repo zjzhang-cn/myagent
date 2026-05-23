@@ -78,12 +78,14 @@ class LLMResponse:
         self,
         content: str = "",
         thinking: str = "",
+        thinking_signature: str = "",
         tool_calls: list[dict] | None = None,
         finish_reason: str = "stop",
         usage: dict | None = None,
     ):
         self.content = content
         self.thinking = thinking
+        self.thinking_signature = thinking_signature
         self.tool_calls = tool_calls or []
         self.finish_reason = finish_reason
         self.usage = usage or {}
