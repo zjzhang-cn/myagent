@@ -99,12 +99,17 @@ class _HybridCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        # 查找光标所在单词
-        word_start = max(text.rfind(" ", 0, document.cursor_position),
-                         text.rfind("/", 0, document.cursor_position),
-                         text.rfind("#", 0, document.cursor_position))
-        if word_start < 0:
-            word_start = 0
+        # 查找光标所在单词起点：# 优先级最高（路径中 / 属于文件名一部分）
+        hash_pos = text.rfind("#", 0, document.cursor_position)
+        if hash_pos >= 0:
+            word_start = hash_pos
+        else:
+            slash_pos = text.rfind("/", 0, document.cursor_position)
+            if slash_pos >= 0:
+                word_start = slash_pos
+            else:
+                space_pos = text.rfind(" ", 0, document.cursor_position)
+                word_start = space_pos + 1 if space_pos >= 0 else 0
         current_word = text[word_start:document.cursor_position]
 
         # / 开头 → 命令补齐
