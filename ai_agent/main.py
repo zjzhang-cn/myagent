@@ -470,10 +470,20 @@ def interactive_mode(agent: Agent) -> None:
         if not user_input:
             continue
 
-        # 只有以 / 开头的输入才是命令，其他直接交给 Agent
+        # 以 / 开头的输入，先检查是否为已知命令
+        _KNOWN_COMMANDS = {
+            "quit", "exit", "q", "reset", "clear", "tools", "skills",
+            "save", "help", "h", "state", "memory",
+        }
         if user_input.startswith("/"):
-            user_input = user_input[1:]
-            lowered = user_input.lower()
+            first_word = user_input[1:].split(maxsplit=1)[0].lower()
+            if first_word in _KNOWN_COMMANDS:
+                user_input = user_input[1:]
+                lowered = user_input.lower()
+            else:
+                # 不以已知命令开头（如 /tmp/path）→ 当作普通输入
+                lowered = ""
+                user_input = _resolve_file_references(user_input)
         else:
             # 非命令输入直接交给 Agent 处理
             lowered = ""
