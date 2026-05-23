@@ -63,9 +63,9 @@ class OpenAILLM(BaseLLM):
         """
         Args:
             model: 模型名（如 gpt-4o, deepseek-chat 等）
-            api_key: API 密钥。不提供则从 OPENAI_API_KEY 环境变量读取。
+            api_key: API 密钥。不提供则从 LLM_API_KEY 环境变量读取。
             base_url: API 基础地址（含版本路径，如 https://api.openai.com/v1）。
-                      不提供则根据 model 名或 OPENAI_BASE_URL 环境变量自动推断。
+                      不提供则根据 LLM_BASE_URL 环境变量或模型名自动推断。
             temperature: 生成温度
             max_tokens: 最大生成 token 数
             response_log_path: 原始响应 JSONL 文件路径
@@ -81,19 +81,18 @@ class OpenAILLM(BaseLLM):
         self.extra_headers = extra_headers or {}
         self.max_retries = max_retries
 
-        # API 密钥：参数 > 环境变量
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        # API 密钥：参数 > LLM_API_KEY
+        self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
         if not self.api_key:
             logger.warning(
-                "未设置 OpenAI API Key，"
-                "请通过 api_key 参数或 OPENAI_API_KEY 环境变量提供"
+                "未设置 API Key，请通过 api_key 参数或 LLM_API_KEY 环境变量提供"
             )
 
-        # 基础地址：参数 > 环境变量 > 已知地址推断 > OpenAI 默认
+        # 基础地址：参数 > LLM_BASE_URL > 已知地址推断 > OpenAI 默认
         if base_url:
             self.base_url = base_url.rstrip("/")
-        elif os.environ.get("OPENAI_BASE_URL"):
-            self.base_url = os.environ["OPENAI_BASE_URL"].rstrip("/")
+        elif os.environ.get("LLM_BASE_URL"):
+            self.base_url = os.environ["LLM_BASE_URL"].rstrip("/")
         else:
             self.base_url = self._infer_base_url(model)
 

@@ -1,11 +1,12 @@
 """
-AI Agent - 基于 OpenAI API 的工具调用型智能 Agent
+AI Agent - 基于 OpenAI/Anthropic API 的工具调用型智能 Agent
 
 支持：
 - 工具调用 (Function Calling)
 - 任务规划与分解
 - 短期/工作/长期记忆系统
 - OpenAI API 及兼容 API
+- Anthropic Claude API（原生支持）
 """
 
 from ai_agent.config import AgentConfig
@@ -18,6 +19,11 @@ try:
     from ai_agent.llm.openai import OpenAILLM
 except ImportError:
     OpenAILLM = None  # type: ignore[assignment]
+
+try:
+    from ai_agent.llm.anthropic import AnthropicLLM
+except ImportError:
+    AnthropicLLM = None  # type: ignore[assignment]
 
 from ai_agent.tools.base import tool
 from ai_agent.tools.registry import ToolRegistry, get_registry
@@ -40,6 +46,7 @@ __all__ = [
     "SkillRegistry",
     "SkillStep",
     "OpenAILLM",
+    "AnthropicLLM",
     "tool",
     "ToolRegistry",
     "get_registry",

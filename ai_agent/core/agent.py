@@ -241,14 +241,7 @@ class Agent:
 
         # LLM
         if llm is None:
-            from ai_agent.llm.openai import OpenAILLM
-            llm = OpenAILLM(
-                model=self.config.model,
-                api_key=self.config.api_key,
-                base_url=self.config.openai_base_url,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-            )
+            llm = self._create_default_llm(self.config)
         self.llm = llm
 
         # 工具注册表
@@ -339,6 +332,41 @@ class Agent:
         self.on_step = on_step
         self.on_token = on_token
         self.on_thinking = on_thinking
+
+    # ----------------------------------------------------------
+    # LLM provider 路由
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _create_default_llm(config):
+        """根据模型名前缀自动选择 LLM 后端。
+
+        - claude 开头 → AnthropicLLM
+        - 其他 → OpenAILLM
+        """
+        model_lower = config.model.lower()
+        if model_lower.startswith("claude"):
+            from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
+            if not HAS_ANTHROPIC:
+                raise ImportError(
+                    "Claude 模型需要 'anthropic' 包。请执行: pip install anthropic"
+                )
+            return AnthropicLLM(
+                model=config.model,
+                api_key=config.api_key,
+                base_url=config.base_url,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+            )
+        else:
+            from ai_agent.llm.openai import OpenAILLM
+            return OpenAILLM(
+                model=config.model,
+                api_key=config.api_key,
+                base_url=config.base_url,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+            )
 
     # ----------------------------------------------------------
     # 公开接口

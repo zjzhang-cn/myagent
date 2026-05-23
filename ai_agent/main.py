@@ -247,7 +247,7 @@ def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
 def create_agent(
     model: str | None = None,
     api_key: str | None = None,
-    openai_base_url: str | None = None,
+    base_url: str | None = None,
     temperature: float | None = None,
     state_dir: str | None = None,
     memory_path: str | None = None,
@@ -290,7 +290,7 @@ def create_agent(
     config = AgentConfig(
         model=model,
         api_key=api_key,
-        openai_base_url=openai_base_url,
+        base_url=base_url,
         temperature=temperature,
         state_dir=state_dir,
         long_term_memory_path=memory_path,
@@ -308,14 +308,33 @@ def create_agent(
     if max_tool_rounds is not None:
         config.max_tool_rounds = max_tool_rounds
 
-    llm = OpenAILLM(
-        model=model,
-        api_key=api_key,
-        base_url=openai_base_url,
-        temperature=temperature,
-        response_log_path=response_log_path,
-        enable_thinking=enable_thinking,
-    )
+    model_lower = model.lower()
+    if model_lower.startswith("claude"):
+        from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
+        if not HAS_ANTHROPIC:
+            sys.stderr.write(
+                "错误: Claude 模型需要 'anthropic' 包。请执行: pip install anthropic\n"
+            )
+            sys.exit(1)
+        llm = AnthropicLLM(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_log_path=response_log_path,
+            enable_thinking=enable_thinking,
+        )
+    else:
+        llm = OpenAILLM(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_log_path=response_log_path,
+            enable_thinking=enable_thinking,
+        )
 
     # 创建工具注册表并注册内置工具
     registry = ToolRegistry()
@@ -868,9 +887,17 @@ def interactive_mode(agent: Agent) -> None:
 
 
 def list_models(api_key: str | None = None,
-                openai_base_url: str | None = None) -> None:
-    """列出可用模型"""
-    llm = OpenAILLM(api_key=api_key, base_url=openai_base_url)
+                base_url: str | None = None,
+                model: str | None = None) -> None:
+    """列出可用模型（根据 model 前缀自动选择后端）"""
+    if model and model.lower().startswith("claude"):
+        from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
+        if not HAS_ANTHROPIC:
+            print("错误: Claude 模型需要 'anthropic' 包。请执行: pip install anthropic")
+            return
+        llm = AnthropicLLM(model=model or "claude-sonnet-4-20250514", api_key=api_key, base_url=base_url)
+    else:
+        llm = OpenAILLM(api_key=api_key, base_url=base_url)
     models = llm.list_models()
     print(f"\n可用模型 ({len(models)} 个):")
     for m in models:
@@ -906,13 +933,13 @@ def main():
     parser.add_argument(
         "--api-key",
         default=None,
-        help="API 密钥（也可通过 OPENAI_API_KEY 环境变量设置）",
+        help="API 密钥（也可通过 LLM_API_KEY 环境变量设置）",
     )
     parser.add_argument(
         "--api-base-url",
         default=None,
         metavar="URL",
-        help="API 基础地址（默认自动推断，也可通过 OPENAI_BASE_URL 环境变量设置）",
+        help="API 基础地址（也可通过 LLM_BASE_URL 环境变量设置）",
     )
     parser.add_argument(
         "--temperature", "-t",
@@ -1082,7 +1109,8 @@ def main():
     if args.list_models:
         list_models(
             api_key=args.api_key,
-            openai_base_url=args.api_base_url,
+            base_url=args.api_base_url,
+            model=args.model,
         )
         return
 
@@ -1095,7 +1123,7 @@ def main():
     agent = create_agent(
         model=args.model,
         api_key=args.api_key,
-        openai_base_url=args.api_base_url,
+        base_url=args.api_base_url,
         temperature=args.temperature,
         state_dir=args.state_dir,
         memory_path=args.memory_path,
