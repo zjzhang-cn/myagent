@@ -84,6 +84,77 @@ _COMMAND_COMPLETIONS: dict[str, dict | None] = {
 }
 
 
+def _resolve_file_references(text: str) -> str:
+    """解析输入中的 #文件路径 引用，替换为文件内容。
+
+    支持格式: #path/to/file 或 #./relative/path 或 #/absolute/path
+    路径以空格或行尾结束。多个引用各自替换。
+    """
+    import re
+
+    pattern = r"#([^\s]+)"
+    matches = list(re.finditer(pattern, text))
+    if not matches:
+        return text
+
+    result_parts = []
+    last_end = 0
+    for m in matches:
+        raw_path = m.group(1)
+        # 去掉可能的尾部标点
+        clean_path = raw_path.rstrip(",;:.!?)]}，。；：！？）】")
+        expanded = os.path.expanduser(clean_path)
+        if not os.path.isabs(expanded):
+            expanded = os.path.abspath(expanded)
+        file_path = Path(expanded)
+
+        # 添加匹配前的文本
+        result_parts.append(text[last_end:m.start()])
+
+        if not file_path.exists():
+            result_parts.append(f"\n[# 文件不存在: {clean_path}]\n")
+        elif not file_path.is_file():
+            result_parts.append(f"\n[# 不是文件: {clean_path}]\n")
+        elif not os.access(file_path, os.R_OK):
+            result_parts.append(f"\n[# 无读取权限: {clean_path}]\n")
+        else:
+            try:
+                # 检测是否为二进制文件
+                with open(file_path, "rb") as f:
+                    head = f.read(8192)
+                if b"\x00" in head:
+                    stat = file_path.stat()
+                    result_parts.append(
+                        f"\n[# 二进制文件: {clean_path} "
+                        f"(大小: {stat.st_size:,} 字节)]\n"
+                    )
+                else:
+                    content = head.decode("utf-8", errors="replace")
+                    # 如果文件较大，读取剩余部分
+                    if len(content) >= 8192:
+                        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+                    # 限制注入到对话中的长度
+                    max_chars = 20000
+                    if len(content) > max_chars:
+                        content = content[:max_chars] + (
+                            f"\n...(文件过长已截断，共 {len(content):,} 字符，"
+                            f"显示前 {max_chars:,} 字符)"
+                        )
+                    ext = file_path.suffix.lstrip(".") or "text"
+                    result_parts.append(
+                        f"\n--- 文件: {clean_path} ---\n"
+                        f"```{ext}\n{content}\n```\n"
+                    )
+            except Exception as e:
+                result_parts.append(f"\n[# 读取失败: {clean_path} — {e}]\n")
+
+        last_end = m.end()
+
+    result_parts.append(text[last_end:])
+    return "".join(result_parts)
+
+
 def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
     """配置日志系统
 
@@ -363,6 +434,8 @@ def interactive_mode(agent: Agent) -> None:
         else:
             # 非命令输入直接交给 Agent 处理
             lowered = ""
+            # 解析 #文件引用
+            user_input = _resolve_file_references(user_input)
 
         if lowered in ("quit", "exit", "q"):
             print("再见！")
