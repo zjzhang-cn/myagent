@@ -2,7 +2,7 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-22 (CLI 体验改进、流式中断与进程管理完成)
+最后更新: 2026-05-22 (全面代码审查，新增 13 项优化建议)
 
 ---
 
@@ -44,6 +44,43 @@
   - memory_embeddings 表存储 float32 向量，add() 时同步生成
   - semantic_search() 余弦相似度排序，支持 min_score 阈值
   - /memory semsearch / /memory ss 交互命令，失败时回退到关键词匹配
+
+### 4a. 并行工具执行泄漏安全上下文 ⚠️ 新增
+
+- **问题**: `_execute_tools_parallel()` 在每个线程中调用 `set_security_context(ctx)` 但从未调用 `clear_security_context()`，导致线程本地安全上下文泄漏。相比之下 `_execute_tools_sequential()` 正确清理了上下文。
+- **影响**: 后续操作可能使用过期的安全上下文，绕过路径沙箱或命令白名单
+- **方案**: 在每个线程的 `_run_one()` 中添加 `try/finally`，在 finally 中调用 `clear_security_context()`
+
+### 4b. SQLite 连接非线程安全 ⚠️ 新增
+
+- **问题**: `LongTermMemory` 在初始化时创建单个 `sqlite3.connect()` 连接，SQLite 连接默认非线程安全。启用并行工具执行时，并发写入会导致 `sqlite3.ProgrammingError`
+- **方案**: 使用 `sqlite3.connect(db_path, check_same_thread=False)` 或使用连接池 / 每线程连接
+
+### 4c. `recall` 未使用语义搜索 ⚠️ 新增
+
+- **问题**: `LongTermMemory.recall()` 仅调用 `self.search()`（SQL LIKE 关键词匹配），尽管已实现 `semantic_search()` 余弦相似度排序。嵌入向量已存储但从未用于检索
+- **方案**: `recall()` 优先使用 `semantic_search()`（当 embedding_fn 可用时），关键词搜索作为回退
+
+### 4d. `remember` 去重使用前 50 字符关键词匹配 ⚠️ 新增
+
+- **问题**: `LongTermMemory.remember()` 用 `content[:50]` 做关键词搜索来检测重复，前 50 字符相同但内容完全不同的记忆会被错误合并
+- **方案**: 升级为 `semantic_search()`，相似度 > 0.85 时合并或更新而非新建
+
+### 4e. `_emit` 静默吞掉回调异常 ⚠️ 新增
+
+- **问题**: `_emit()` 用 `logger.debug()` 记录回调异常，即使在 verbose 模式下也看不到。如果 `on_step`、`on_token` 或 `on_thinking` 回调抛出异常（如 UI 回调网络问题），错误静默丢失
+- **方案**: 提升到 `logger.warning()` 或 `logger.error()`，并可选地重新抛出
+
+### 4f. `_simple_chat` 绕过消息裁剪 ⚠️ 新增
+
+- **问题**: Planner 使用的 `_simple_chat()` 直接调用 `self.llm.chat(messages, tools=None)`，绕过 `_trim_messages()` 和 `_validate_tool_messages()`
+- **影响**: 当 Planner 的对话历史增长到超 token 限制时，会直接触发 API 错误
+- **方案**: 在 `_simple_chat()` 中加入轻量级 token 估算和截断
+
+### 4g. `_parse_sdk_response` 假设 choices 非空 ⚠️ 新增
+
+- **问题**: `openai.py` 中 `choice = response.choices[0]` 在 API 返回空 choices 数组时抛出 `IndexError`
+- **方案**: 添加 `if not response.choices` 检查，返回明确错误信息
 
 ---
 
@@ -91,6 +128,31 @@
     - `ai_agent/config.py` — 新增 `auto_snapshot_interval`、`state_compress_threshold`
     - `ai_agent/core/agent.py` — 新增 `_STATE_SCHEMA_VERSION`、`_compress_value`/`_decompress_value`、`_compress_state_data`/`_decompress_state_data`、自动快照注入
     - `ai_agent/main.py` — 状态列表显示版本/快照标记、新增 `state prune`
+
+### 8a. 消息验证 O(n^2) 复杂度 ⚠️ 新增
+
+- **问题**: `_validate_tool_messages()` 的三遍扫描中，`_find_prev_assistant()` 对每个 tool 消息反向扫描整个 cleaned 列表。当对话历史包含大量 tool_call + tool 消息对（15 轮 × 3 工具 = 90 条 tool 消息），复杂度为 O(n^2)
+- **方案**: 第一遍扫描时构建 `tool_call_id → assistant_index` 映射表，后续查找 O(1)
+
+### 8b. 语义搜索全量加载嵌入向量 ⚠️ 新增
+
+- **问题**: `semantic_search()` 使用 `SELECT memory_id, embedding, dim FROM memory_embeddings` 无 LIMIT，每次查询加载全表并计算所有余弦相似度。1 万条 × 1536 维 float32 = ~60MB 加载 + 1500 万次浮点运算
+- **方案**: 使用 `LIMIT 500` 先缩小候选集（按更新时间/重要度排序），或用 faiss/chroma 做近似最近邻
+
+### 8c. 无工具调用断路器 ⚠️ 新增
+
+- **问题**: 当某个工具持续失败（如 `search_web` 网络不可用），Agent 在重新规划中反复调用它（最多 `max_replan_attempts=2` 次 × 原始次数），浪费 Token 预算
+- **方案**: 相同工具+相同参数单次会话失败 ≥ 2 次后暂停该工具，提示 LLM 使用替代方案
+
+### 8d. Agent 类过于庞大 ⚠️ 新增
+
+- **问题**: `core/agent.py` 约 1770 行，混合了：系统提示词构建、消息裁剪、tool 消息验证、顺序/并行工具执行、错误分类、状态序列化/压缩/快照、会话恢复、记忆集成
+- **方案**: 拆分为：`MessageValidator`（消息验证）→ `StateManager`（序列化/压缩/快照/恢复）→ `AgentCore`（ReAct 循环 + 工具执行 + 错误处理），保持 Agent 作为外观类
+
+### 8e. 状态压缩深拷贝加倍峰值内存 ⚠️ 新增
+
+- **问题**: `_compress_state_data()` 在递归压缩前执行 `data = copy.deepcopy(data)`，为 50+ 条消息的对话历史创建完整副本，临时加倍内存占用
+- **方案**: 就地压缩，或在原地修改后再更新引用
 
 ---
 
@@ -242,15 +304,19 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 | 27 | README 仅中文，海外用户门槛高 | 补充英文版 README 或双语对照章节 |
 | 28 | `example.py` 未覆盖新功能 | 补充语义搜索、会话持久化、自动恢复的演示 |
 | 29 | 无贡献指南 | 新增 `CONTRIBUTING.md`，说明开发环境、PR 流程、编码规范 |
+| 30 | `load_tools_from_directory` 永久修改 `sys.path` | 改为临时插入 + finally 清理，或使用 `importlib` 完全限定加载 |
+| 31 | 路径沙箱写保护白名单覆盖不全 | 补充 `.aws`、`.kube`、`.docker`、`.vault`、`.npmrc` 等凭据目录到 `FORBIDDEN_DIRS` |
+| 32 | Web 工具 `import` 在函数体内 | `search_web`/`fetch_url` 中的 `import requests`/`from bs4 import BeautifulSoup` 移到模块顶层，减少每次调用 100-200ms 导入开销 |
+| 33 | `_replan_count` 与 `max_iterations` 独立约束 | 重新规划后迭代计数不重置，可能导致新计划在剩余迭代中无法完成；考虑重新规划时重置迭代计数的策略 |
 
 ---
 
 ## 实施建议
 
-1. **P0 先做** — 测试覆盖 ✅。错误恢复差异化（改动小收益高，下一个推荐）
-2. **P1 选做** — 多 LLM 后端的成本/收益最高；API Server 看是否需要嵌入现有系统
-3. **P2 按需** — Skills ✅、CLI 改进 ✅、流式中断 ✅ 已完成。Token 监控（20 行）、首次运行引导（提升首次体验）容易做；搜索 Provider 和多模态扩展取决于使用场景
-4. **P3 穿插** — ruff + pre-commit + CI 可一次搞定，后续每轮自动保持代码质量。文档改进可在其他任务间隙顺手推进
+1. **P0 先做** — 测试覆盖 ✅。新增 4a-4g 共 7 项关键缺陷，建议按序逐个修复：安全上下文泄漏 → 线程安全 → recall 语义搜索 → remember 去重 → _emit 静默错误 → _simple_chat 裁剪 → _parse_sdk_response 空 choices
+2. **P1 选做** — 消息验证 O(n^2)、语义搜索全量加载、工具断路器是实用性强的改进；Agent 类拆分可逐步进行（先抽 MessageValidator，再抽 StateManager）
+3. **P2 按需** — Skills ✅、CLI 改进 ✅、流式中断 ✅ 已完成。Token 监控（20 行）、首次运行引导容易做；搜索 Provider 和多模态扩展取决于使用场景
+4. **P3 穿插** — ruff + pre-commit + CI 可一次搞定。新增 4 项：sys.path 修复、路径沙箱补充、Web 导入优化、replan 迭代策略
 
 ---
 
