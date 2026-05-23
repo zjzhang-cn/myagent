@@ -339,17 +339,16 @@ class Agent:
 
     @staticmethod
     def _create_default_llm(config):
-        """根据模型名前缀自动选择 LLM 后端。
+        """根据 LLM_TYPE 配置选择 LLM 后端。
 
-        - claude 开头 → AnthropicLLM
-        - 其他 → OpenAILLM
+        - llm_type="anthropic" → AnthropicLLM
+        - 其他（默认）→ OpenAILLM
         """
-        model_lower = config.model.lower()
-        if model_lower.startswith("claude"):
+        if config.llm_type == "anthropic":
             from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
             if not HAS_ANTHROPIC:
                 raise ImportError(
-                    "Claude 模型需要 'anthropic' 包。请执行: pip install anthropic"
+                    "Anthropic 后端需要 'anthropic' 包。请执行: pip install anthropic"
                 )
             return AnthropicLLM(
                 model=config.model,

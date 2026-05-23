@@ -13,6 +13,7 @@ class AgentConfig:
 
     # LLM 配置
     model: str = "deepseek-v4-flash"  # 模型名
+    llm_type: str = "openai"  # LLM 后端类型：openai / anthropic
     api_key: str | None = None  # API 密钥（不提供则从 LLM_API_KEY 环境变量读取）
     base_url: str | None = None  # API 基础地址（不提供则根据模型名自动推断 或 使用 SDK 默认）
     temperature: float = 0.7

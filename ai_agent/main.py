@@ -248,6 +248,7 @@ def create_agent(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    llm_type: str | None = None,
     temperature: float | None = None,
     state_dir: str | None = None,
     memory_path: str | None = None,
@@ -272,6 +273,7 @@ def create_agent(
     memory_path = memory_path or os.environ.get("AGENT_MEMORY_PATH", "~/.ai_agent/long_term_memory.db")
     tools_dir = tools_dir or os.environ.get("AGENT_TOOLS_DIR")
     skills_dir = skills_dir or os.environ.get("AGENT_SKILLS_DIR")
+    llm_type = llm_type or os.environ.get("LLM_TYPE", "openai")
     if max_context_tokens is None:
         val = os.environ.get("AGENT_MAX_CONTEXT_TOKENS", "")
         max_context_tokens = int(val) if val else 65536
@@ -291,6 +293,7 @@ def create_agent(
         model=model,
         api_key=api_key,
         base_url=base_url,
+        llm_type=llm_type,
         temperature=temperature,
         state_dir=state_dir,
         long_term_memory_path=memory_path,
@@ -308,12 +311,11 @@ def create_agent(
     if max_tool_rounds is not None:
         config.max_tool_rounds = max_tool_rounds
 
-    model_lower = model.lower()
-    if model_lower.startswith("claude"):
+    if llm_type == "anthropic":
         from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
         if not HAS_ANTHROPIC:
             sys.stderr.write(
-                "错误: Claude 模型需要 'anthropic' 包。请执行: pip install anthropic\n"
+                "错误: Anthropic 后端需要 'anthropic' 包。请执行: pip install anthropic\n"
             )
             sys.exit(1)
         llm = AnthropicLLM(
@@ -888,9 +890,9 @@ def interactive_mode(agent: Agent) -> None:
 
 def list_models(api_key: str | None = None,
                 base_url: str | None = None,
-                model: str | None = None) -> None:
-    """列出可用模型（根据 model 前缀自动选择后端）"""
-    if model and model.lower().startswith("claude"):
+                llm_type: str = "") -> None:
+    """列出可用模型（根据 llm_type 选择后端）"""
+    if llm_type == "anthropic":
         from ai_agent.llm.anthropic import AnthropicLLM, HAS_ANTHROPIC
         if not HAS_ANTHROPIC:
             print("错误: Claude 模型需要 'anthropic' 包。请执行: pip install anthropic")
@@ -929,6 +931,12 @@ def main():
         "--model", "-m",
         default=None,
         help="模型名（可通过 AGENT_MODEL 环境变量或 .env 文件设置）",
+    )
+    parser.add_argument(
+        "--llm-type",
+        default=None,
+        choices=["openai", "anthropic"],
+        help="LLM 后端类型（默认 openai，也可通过 LLM_TYPE 环境变量设置）",
     )
     parser.add_argument(
         "--api-key",
@@ -1074,6 +1082,8 @@ def main():
     # 命令行参数的默认值从 env var / .env 中读取（滞后解析，确保 load_dotenv 已执行）
     if args.model is None:
         args.model = os.environ.get("AGENT_MODEL", "deepseek-v4-flash")
+    if args.llm_type is None:
+        args.llm_type = os.environ.get("LLM_TYPE", "openai")
     if args.temperature is None:
         args.temperature = float(os.environ.get("AGENT_TEMPERATURE", "0.7"))
     if args.state_dir is None:
@@ -1110,7 +1120,7 @@ def main():
         list_models(
             api_key=args.api_key,
             base_url=args.api_base_url,
-            model=args.model,
+            llm_type=args.llm_type or "",
         )
         return
 
@@ -1124,6 +1134,7 @@ def main():
         model=args.model,
         api_key=args.api_key,
         base_url=args.api_base_url,
+        llm_type=args.llm_type,
         temperature=args.temperature,
         state_dir=args.state_dir,
         memory_path=args.memory_path,
