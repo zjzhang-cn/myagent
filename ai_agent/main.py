@@ -84,6 +84,49 @@ _COMMAND_COMPLETIONS: dict[str, dict | None] = {
 }
 
 
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
+
+
+class _HybridCompleter(Completer):
+    """混合补齐器：/ 前缀用命令补齐，# 前缀用文件路径补齐"""
+
+    def __init__(self, command_completer: NestedCompleter):
+        self._commands = command_completer
+        self._paths = PathCompleter(
+            only_directories=False,
+            expanduser=True,
+        )
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        # 查找光标所在单词
+        word_start = max(text.rfind(" ", 0, document.cursor_position),
+                         text.rfind("/", 0, document.cursor_position),
+                         text.rfind("#", 0, document.cursor_position))
+        if word_start < 0:
+            word_start = 0
+        current_word = text[word_start:document.cursor_position]
+
+        # / 开头 → 命令补齐
+        if current_word.startswith("/"):
+            yield from self._commands.get_completions(document, complete_event)
+        # # 开头 → 文件路径补齐
+        elif current_word.startswith("#"):
+            # 去掉 # 前缀后做路径补齐
+            from prompt_toolkit.document import Document
+            prefix_len = word_start + 1  # 跳过 #
+            # 构造一个新的 Document，去掉 # 前缀
+            new_text = text[:word_start] + text[word_start + 1:]
+            new_doc = Document(
+                text=new_text,
+                cursor_position=document.cursor_position - 1,
+            )
+            yield from self._paths.get_completions(new_doc, complete_event)
+        else:
+            # 非特殊前缀，用命令补齐（不匹配则不补）
+            yield from self._commands.get_completions(document, complete_event)
+
+
 def _resolve_file_references(text: str) -> str:
     """解析输入中的 #文件路径 引用，替换为文件内容。
 
@@ -92,7 +135,7 @@ def _resolve_file_references(text: str) -> str:
     """
     import re
 
-    pattern = r"#([^\s]+)"
+    pattern = r"(?:^|\s)#([^\s]+)"
     matches = list(re.finditer(pattern, text))
     if not matches:
         return text
@@ -402,7 +445,7 @@ def interactive_mode(agent: Agent) -> None:
     history_path = os.path.expanduser("~/.ai_agent/history")
     os.makedirs(os.path.dirname(history_path), exist_ok=True)
     session = PromptSession(history=FileHistory(history_path))
-    completer = NestedCompleter.from_nested_dict(_COMMAND_COMPLETIONS)
+    completer = _HybridCompleter(NestedCompleter.from_nested_dict(_COMMAND_COMPLETIONS))
     prompt_style = Style.from_dict({
         "prompt": "#00aa00 bold",
     }) if _use_color else None
