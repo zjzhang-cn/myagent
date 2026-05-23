@@ -1649,11 +1649,13 @@ class Agent:
                         full_thinking = event.thinking or full_thinking
                         final_tool_calls = event.tool_calls
                         final_usage = event.usage
+                        final_thinking_signature = getattr(event, 'thinking_signature', '') or ""
 
                 if full_content or full_thinking or final_tool_calls:
                     return LLMResponse(
                         content=full_content,
                         thinking=full_thinking,
+                        thinking_signature=final_thinking_signature,
                         tool_calls=final_tool_calls,
                         usage=final_usage,
                     )

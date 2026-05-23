@@ -258,6 +258,7 @@ class AnthropicLLM(BaseLLM):
             type="done",
             content=full_content.strip(),
             thinking=full_thinking.strip(),
+            thinking_signature=thinking_signature,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=usage,

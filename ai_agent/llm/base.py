@@ -13,6 +13,7 @@ class StreamEvent:
     type: str  # "thinking" | "token" | "done"
     content: str = ""  # token/thinking 文本 或 完整内容（done 时）
     thinking: str = ""  # 完整推理内容（done 时）
+    thinking_signature: str = ""  # 推理签名（Anthropic 扩展思考要求回传）
     tool_calls: list[dict] = field(default_factory=list)  # done 时解析的工具调用
     finish_reason: str = "stop"
     usage: dict = field(default_factory=dict)
