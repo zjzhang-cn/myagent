@@ -254,6 +254,8 @@ def create_agent(
     max_context_tokens: int | None = None,
     max_tool_result_chars: int | None = None,
     max_tokens: int | None = None,
+    max_iterations: int | None = None,
+    max_tool_rounds: int | None = None,
     tools_dir: str | None = None,
     skills_dir: str | None = None,
     verbose: bool = False,
@@ -279,6 +281,12 @@ def create_agent(
     if max_tokens is None:
         val = os.environ.get("AGENT_MAX_TOKENS", "")
         max_tokens = int(val) if val else 4096
+    if max_iterations is None:
+        val = os.environ.get("AGENT_MAX_ITERATIONS", "")
+        max_iterations = int(val) if val else 0
+    if max_tool_rounds is None:
+        val = os.environ.get("AGENT_MAX_TOOL_ROUNDS", "")
+        max_tool_rounds = int(val) if val else 0
     config = AgentConfig(
         model=model,
         api_key=api_key,
@@ -295,6 +303,10 @@ def create_agent(
         config.tools_dir = tools_dir
     if skills_dir:
         config.skills_dir = skills_dir
+    if max_iterations is not None:
+        config.max_iterations = max_iterations
+    if max_tool_rounds is not None:
+        config.max_tool_rounds = max_tool_rounds
 
     llm = OpenAILLM(
         model=model,
@@ -933,7 +945,7 @@ def main():
         "--skills-dir",
         default=None,
         metavar="PATH",
-        help="技能定义目录，启动时自动加载其中的 Skill.md 文件",
+        help="技能定义目录，多个路径用 : 分隔。默认自动加载 ~/.ai_agent/skills 和 ./.ai_agent/skills，设置后仅加载指定目录",
     )
     parser.add_argument(
         "--no-resume",
@@ -998,6 +1010,20 @@ def main():
         help="LLM 单次输出最大 token 数（默认 4096，也可通过 AGENT_MAX_TOKENS 环境变量设置）",
     )
     parser.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="工具调用最大轮数（默认 0=不限制，也可通过 AGENT_MAX_TOOL_ROUNDS 环境变量设置）",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        metavar="N",
+        help="ReAct 循环最大轮次（默认 0=不限制，也可通过 AGENT_MAX_ITERATIONS 环境变量设置）",
+    )
+    parser.add_argument(
         "--color",
         action="store_true",
         default=None,
@@ -1036,6 +1062,12 @@ def main():
     if args.max_tokens is None:
         val = os.environ.get("AGENT_MAX_TOKENS", "")
         args.max_tokens = int(val) if val else 4096
+    if args.max_tool_rounds is None:
+        val = os.environ.get("AGENT_MAX_TOOL_ROUNDS", "")
+        args.max_tool_rounds = int(val) if val else 0
+    if args.max_iterations is None:
+        val = os.environ.get("AGENT_MAX_ITERATIONS", "")
+        args.max_iterations = int(val) if val else 0
 
     # 配置日志（必须在其他模块导入之前完成，但这里是最早的调用点）
     setup_logging(verbose=args.verbose, log_file=args.log_file)
@@ -1070,6 +1102,8 @@ def main():
         max_context_tokens=args.max_context_tokens,
         max_tool_result_chars=args.max_tool_result_chars,
         max_tokens=args.max_tokens,
+        max_iterations=args.max_iterations,
+        max_tool_rounds=args.max_tool_rounds,
         tools_dir=args.tools_dir,
         skills_dir=args.skills_dir,
         verbose=args.verbose,

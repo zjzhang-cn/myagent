@@ -19,7 +19,8 @@ class AgentConfig:
     max_tokens: int = 4096
 
     # Agent 行为
-    max_iterations: int = 15          # ReAct 循环最大轮次
+    max_iterations: int = 0            # ReAct 循环最大轮次（0=不限制）
+    max_tool_rounds: int = 0           # 工具调用最大轮数（0=不限制）
     max_tool_calls_per_iteration: int = 3
     max_parallel_tools: int = 5       # 并发工具执行的最大线程数
     parallel_tool_execution: bool = True  # 是否启用并发工具执行
@@ -52,7 +53,7 @@ class AgentConfig:
     skills: list[dict] = field(default_factory=list)
     """内联技能定义列表，每项为 Skill 的字典表示"""
     skills_dir: str | None = None
-    """技能定义文件目录，启动时自动加载其中包含 Skill.md 的子目录"""
+    """技能定义文件目录，默认自动加载 ~/.ai_agent/skills 和 ./.ai_agent/skills。设置后仅加载指定目录"""
     enable_skills: bool = True
     """是否启用技能系统"""
 

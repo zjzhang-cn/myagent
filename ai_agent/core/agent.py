@@ -285,8 +285,20 @@ class Agent:
                 logger.warning(f"内联技能加载失败: {e}")
 
         # 目录技能
+        # 默认加载 ~/.ai_agent/skills 和 ./.ai_agent/skills
+        # 用户显式设置 skills_dir 时仅加载指定目录（支持 : 分隔多个路径）
         if self.config.skills_dir:
-            skills_dir = os.path.expanduser(self.config.skills_dir)
+            skill_dirs = [
+                os.path.expanduser(d.strip())
+                for d in self.config.skills_dir.split(os.pathsep)
+                if d.strip()
+            ]
+        else:
+            skill_dirs = [
+                os.path.expanduser("~/.ai_agent/skills"),
+                os.path.abspath(".ai_agent/skills"),
+            ]
+        for skills_dir in skill_dirs:
             try:
                 loaded = load_skills_from_directory(skills_dir)
                 for skill in loaded:
@@ -321,6 +333,7 @@ class Agent:
         self.current_plan: Plan | None = None
         self._replan_count: int = 0  # 当前任务中已重新规划次数
         self._iteration_count: int = 0  # 当前 run 中的迭代计数
+        self._tool_round_count: int = 0  # 有工具调用的迭代次数
         self._no_toolcall_streak: int = 0  # 连续无工具调用次数
         self._interrupted: bool = False  # SIGINT 中断标志
         self.on_step = on_step
@@ -347,6 +360,7 @@ class Agent:
         # Step 0: 将用户输入加入短期记忆
         self._replan_count = 0  # 重置重新规划计数
         self._iteration_count = 0  # 重置迭代计数
+        self._tool_round_count = 0  # 重置工具调用轮数
         self._no_toolcall_streak = 0  # 重置连续无工具调用计数
         self._interrupted = False  # 重置中断标志
         self.short_term.add_user(user_input)
@@ -378,8 +392,13 @@ class Agent:
 
         # Step 2: ReAct 循环
         final_answer = ""
-        for iteration in range(1, self.config.max_iterations + 1):
-            logger.info(f"--- ReAct 循环 {iteration}/{self.config.max_iterations} ---")
+        iteration = 0
+        while True:
+            iteration += 1
+            if self.config.max_iterations > 0 and iteration > self.config.max_iterations:
+                break
+            limit_str = f"/{self.config.max_iterations}" if self.config.max_iterations > 0 else ""
+            logger.info(f"--- ReAct 循环 {iteration}{limit_str} ---")
             self._iteration_count = iteration
 
             # 自动快照：每 N 轮迭代保存一次状态
@@ -435,6 +454,20 @@ class Agent:
             })
 
             if tool_calls:
+                # 检查工具调用轮数上限
+                self._tool_round_count += 1
+                if self.config.max_tool_rounds > 0 and self._tool_round_count > self.config.max_tool_rounds:
+                    logger.warning(
+                        f"工具调用轮数已达上限 ({self.config.max_tool_rounds})，"
+                        f"强制结束本轮并生成总结"
+                    )
+                    self.state = AgentState.DONE
+                    final_answer = self._force_summary()
+                    self.short_term.add_assistant(final_answer)
+                    step.state = AgentState.DONE
+                    self._emit("done", {"answer": final_answer})
+                    break
+
                 # 2c. 执行工具
                 self.state = AgentState.ACTING
                 limited_calls = tool_calls[:self.config.max_tool_calls_per_iteration]
@@ -692,7 +725,7 @@ class Agent:
                 self._emit("done", {"answer": final_answer})
                 break
 
-        # 如果达到最大迭代次数还未结束
+        # 如果达到最大迭代次数还未结束（仅当设置了限制时）
         if self.state != AgentState.DONE:
             final_answer = self._force_summary()
             self.state = AgentState.DONE
