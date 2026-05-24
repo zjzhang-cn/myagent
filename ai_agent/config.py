@@ -2,9 +2,14 @@
 AI Agent 配置文件
 """
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from ai_agent.prompts import PromptsConfig
 
 
 @dataclass
@@ -81,6 +86,9 @@ class AgentConfig:
         "请用中文回复用户。\n"
         "完成所有步骤后，基于工具执行结果生成完整、有帮助的总结。"
     ))
+
+    # 提示词配置（可自定义覆盖所有 LLM 提示词模板）
+    prompts: "PromptsConfig | None" = None
 
     def __post_init__(self):
         self.long_term_memory_path = os.path.expanduser(self.long_term_memory_path)

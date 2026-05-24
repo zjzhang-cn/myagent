@@ -14,6 +14,7 @@ from ai_agent.core.agent import Agent, AgentResult, AgentState
 from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, PlanStep, StepStatus
 from ai_agent.core.skills import Skill, SkillRegistry, SkillStep
+from ai_agent.prompts import PromptsConfig
 
 try:
     from ai_agent.llm.openai import OpenAILLM
@@ -47,6 +48,7 @@ __all__ = [
     "SkillStep",
     "OpenAILLM",
     "AnthropicLLM",
+    "PromptsConfig",
     "tool",
     "ToolRegistry",
     "get_registry",

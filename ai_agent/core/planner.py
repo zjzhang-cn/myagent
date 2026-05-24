@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
+from ai_agent.prompts import PromptsConfig
+
 if TYPE_CHECKING:
     from ai_agent.core.skills import Skill, SkillRegistry
 
@@ -112,35 +114,41 @@ class Plan:
                 step.result = result
                 return
 
-    def format_for_prompt(self) -> str:
+    def format_for_prompt(self, prompts: PromptsConfig | None = None) -> str:
         """生成计划描述文本，用于注入 prompt"""
-        lines = [f"执行计划（任务: {self.task}）:"]
+        if prompts is None:
+            prompts = PromptsConfig()
+        lines = [prompts.plan_title.format(task=self.task)]
         for step in self.steps:
-            status_icon = {
-                StepStatus.PENDING: "⏳",
-                StepStatus.IN_PROGRESS: "🔄",
-                StepStatus.COMPLETED: "✅",
-                StepStatus.FAILED: "❌",
-                StepStatus.SKIPPED: "⏭️",
-            }.get(step.status, "❓")
+            status_icon = prompts.plan_step_status_icons.get(step.status.value, "❓")
 
             deps = ""
             if step.dependencies:
-                deps = f" [依赖: {', '.join(f'Step {d}' for d in step.dependencies)}]"
+                deps = prompts.plan_deps_format.format(
+                    deps=", ".join(f"Step {d}" for d in step.dependencies)
+                )
 
-            lines.append(f"  {status_icon} Step {step.id}: {step.description}{deps}")
+            lines.append(prompts.plan_step_format.format(
+                icon=status_icon, step_id=step.id, desc=step.description, deps=deps
+            ))
             if step.result:
-                lines.append(f"      结果: {step.result[:200]}")
+                lines.append(prompts.plan_step_result.format(result=step.result[:200]))
 
         # 显示当前可并行执行的步骤
         executable = self.get_executable_steps()
         if len(executable) > 1:
             lines.append(
-                f"\n⚡ 当前可并行执行 ({len(executable)} 步): "
-                + ", ".join(f"Step {s.id} ({s.description})" for s in executable)
+                prompts.plan_parallel_hint.format(
+                    count=len(executable),
+                    descs=", ".join(f"Step {s.id} ({s.description})" for s in executable)
+                )
             )
         elif executable:
-            lines.append(f"\n当前应执行: Step {executable[0].id} - {executable[0].description}")
+            lines.append(
+                prompts.plan_current_step.format(
+                    step_id=executable[0].id, desc=executable[0].description
+                )
+            )
 
         return "\n".join(lines)
 
@@ -279,32 +287,24 @@ def _split_task(task: str) -> list[str]:
 class Planner:
     """任务规划器"""
 
-    # LLM 二次验证的 prompt
-    _VERIFY_COMPLEXITY_PROMPT = (
-        '你是一个任务复杂度判断专家。用户的请求是一个多步骤任务，需要规划执行？\n'
-        '如果请求满足以下任意条件请回答"是"，否则回答"否"：\n'
-        "1. 需要调用多个不同的工具才能完成\n"
-        "2. 需要按照先后顺序执行多个步骤\n"
-        "3. 涉及搜索信息、处理结果、保存输出等多个阶段\n"
-        "4. 需要批量处理多个文件或数据\n\n"
-        '请只回答"是"或"否"。'
-    )
-
     def __init__(
         self,
         llm_chat: Callable,
         tools_description: str = "",
         skill_registry: SkillRegistry | None = None,
+        prompts: PromptsConfig | None = None,
     ):
         """
         Args:
             llm_chat: LLM 聊天函数，签名: (messages: list[dict]) -> str
             tools_description: 可用工具的描述文本
             skill_registry: 技能注册表（可选），提供后启用技能匹配快速路径
+            prompts: 提示词配置（可选，默认使用 PromptsConfig()）
         """
         self._chat = llm_chat
         self._tools_desc = tools_description
         self._skill_registry = skill_registry
+        self.prompts = prompts or PromptsConfig()
 
     def should_plan(self, user_input: str, threshold: int = 3) -> bool:
         """判断是否需要启动规划
@@ -333,11 +333,11 @@ class Planner:
             messages = [
                 {
                     "role": "system",
-                    "content": self._VERIFY_COMPLEXITY_PROMPT,
+                    "content": self.prompts.verify_complexity_system,
                 },
                 {
                     "role": "user",
-                    "content": f"请判断以下请求是否需要规划：\n{user_input}",
+                    "content": self.prompts.verify_complexity_user.format(user_input=user_input),
                 },
             ]
             response = self._chat(messages)
@@ -393,29 +393,12 @@ class Planner:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是一个任务规划专家。请将用户的请求分解为具体的执行步骤。\n"
-                    f"可用工具：{self._tools_desc}\n"
-                    f"{skills_section}"
-                    "请输出 JSON 格式的计划，每个步骤包含以下字段：\n"
-                    "- id: 步骤编号（从1开始）\n"
-                    "- description: 步骤描述\n"
-                    "- tool_hint: 建议使用的工具名（可选）\n"
-                    '- dependencies: 依赖的步骤 id 列表（如 [1] 表示依赖第1步完成，[] 表示无依赖）\n'
-                    '- skill: 如果某个可用技能的描述与任务高度匹配，可以在此字段填写技能名称'
-                    "，该技能的内容将被加载用于指导执行（可选）\n\n"
-                    '格式：{"steps": [{"id": 1, "description": "...", "tool_hint": "tool_name",'
-                    ' "dependencies": [], "skill": "技能名(可选)"}, ...]}\n'
-                    "要求：\n"
-                    "1. 步骤应该具体、可执行，每个步骤完成一件事\n"
-                    "2. 步骤总数不超过 10 个\n"
-                    "3. tool_hint 是可选的，仅当明显需要特定工具时给出\n"
-                    "4. dependencies 是关键：明确标注每个步骤的依赖关系\n"
-                    "5. 互不依赖的步骤可以标记为空依赖 []，表示可以并行执行\n"
-                    "6. 仅输出 JSON，不要有其他内容"
+                "content": self.prompts.plan_system.format(
+                    tools_description=f"可用工具：{self._tools_desc}",
+                    skills_section=skills_section,
                 ),
             },
-            {"role": "user", "content": f"请为以下任务制定执行计划：\n{task}"},
+            {"role": "user", "content": self.prompts.plan_user.format(task=task)},
         ]
 
         try:
@@ -507,17 +490,13 @@ class Planner:
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是一个任务规划专家。当前计划执行遇到问题，请根据反馈调整计划。\n"
-                    "请输出调整后的 JSON 格式计划，仅输出 JSON。"
-                ),
+                "content": self.prompts.replan_system,
             },
             {
                 "role": "user",
-                "content": (
-                    f"原始计划：\n{original_plan.format_for_prompt()}\n\n"
-                    f"执行反馈：{feedback}\n\n"
-                    "请输出调整后的计划："
+                "content": self.prompts.replan_user.format(
+                    original_plan=original_plan.format_for_prompt(self.prompts),
+                    feedback=feedback,
                 ),
             },
         ]

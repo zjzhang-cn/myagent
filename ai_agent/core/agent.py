@@ -28,6 +28,7 @@ from ai_agent.core.memory import LongTermMemory, ShortTermMemory, WorkingMemory
 from ai_agent.core.planner import Plan, Planner, StepStatus
 from ai_agent.core.skills import Skill, SkillRegistry, load_skills_from_directory
 from ai_agent.llm.base import BaseLLM, LLMResponse
+from ai_agent.prompts import PromptsConfig
 from ai_agent.tools.registry import ToolRegistry, load_tools_from_directory
 from ai_agent.utils.security import SecurityContext, set_security_context, clear_security_context
 from ai_agent.utils.token_utils import estimate_message_tokens, estimate_messages_tokens, truncate_text
@@ -315,11 +316,15 @@ class Agent:
         )
         self.short_term.set_system_prompt(self.config.system_prompt)
 
+        # 提示词配置
+        self.prompts = self.config.prompts or PromptsConfig()
+
         # 规划器
         self.planner = Planner(
             llm_chat=self._simple_chat,
             tools_description=self.tool_registry.describe_for_prompt(),
             skill_registry=self.skill_registry if self.config.enable_skills else None,
+            prompts=self.prompts,
         )
 
         self.state = AgentState.IDLE
@@ -443,7 +448,7 @@ class Agent:
                 last_resp = locals().get("response")
                 final_answer = (
                     last_resp.content if last_resp and last_resp.content
-                    else "任务已被用户中断。"
+                    else self.prompts.fallback_interrupted
                 )
                 self._emit("done", {"answer": final_answer})
                 break
@@ -664,12 +669,10 @@ class Agent:
                     else:
                         step_hint = (executable[0] if executable else next_step).description
 
-                    hint = (
-                        f"⚠️ 计划尚未完成！你必须继续执行。\n"
-                        f"进度：{self.current_plan.completed_steps}/{self.current_plan.total_steps}\n"
-                        f"立即执行：{step_hint}\n"
-                        f"请只输出工具调用 JSON：\n"
-                        f'{{"tool_call": {{"name": "工具名", "arguments": {{"参数": "值"}}}}}}'
+                    hint = self.prompts.no_toolcall_hint.format(
+                        completed=self.current_plan.completed_steps,
+                        total=self.current_plan.total_steps,
+                        step_hint=step_hint,
                     )
                     self.short_term.add_assistant(hint)
                     logger.warning(
@@ -739,11 +742,9 @@ class Agent:
             if self.current_plan and self.current_plan.get_next_step() is None:
                 self.state = AgentState.DONE
                 if self.current_plan.failed_steps > 0:
-                    # 有失败步骤，生成包含失败信息的总结
                     summary_messages = self._build_summary_prompt()
-                    summary_messages[0]["content"] += (
-                        f"\n注意：有 {self.current_plan.failed_steps} 个步骤执行失败。"
-                        f"请在总结中说明哪些步骤已完成、哪些失败，并给出建议。"
+                    summary_messages[0]["content"] += self.prompts.summary_with_failures.format(
+                        failed_count=self.current_plan.failed_steps
                     )
                 else:
                     summary_messages = self._build_summary_prompt()
@@ -766,14 +767,9 @@ class Agent:
                 if fallback and fallback.strip():
                     final_answer = fallback
                 else:
-                    final_answer = (
-                        "抱歉，我暂时无法完成你的请求。"
-                        "请尝试简化问题或重新表述后重试。"
-                    )
+                    final_answer = self.prompts.fallback_empty_answer
             except Exception:
-                final_answer = (
-                    "抱歉，处理过程中遇到问题，请重新尝试。"
-                )
+                final_answer = self.prompts.fallback_exception
 
         elapsed = time.time() - start_time
 
@@ -1206,33 +1202,31 @@ class Agent:
 
         # 注入计划信息（放在工具描述之前，优先级更高）
         if self.current_plan:
-            plan_text = self.current_plan.format_for_prompt()
-            system_parts.append(f"\n## 当前任务计划\n{plan_text}")
+            plan_text = self.current_plan.format_for_prompt(self.prompts)
+            system_parts.append(self.prompts.plan_header.format(plan_text=plan_text))
             executable = self.current_plan.get_executable_steps()
             if executable:
                 if len(executable) == 1:
                     system_parts.append(
-                        f"\n**⚠️ 你正在执行计划，现在必须完成 Step {executable[0].id}: "
-                        f"{executable[0].description}**"
+                        self.prompts.plan_executable_single.format(
+                            step_id=executable[0].id,
+                            step_desc=executable[0].description,
+                        )
                     )
                 else:
-                    # 多个可并行执行的步骤
                     descs = "、".join(
                         f"Step {s.id} ({s.description})" for s in executable
                     )
                     system_parts.append(
-                        f"\n**⚡ 当前有 {len(executable)} 个步骤可以并行执行: {descs}**\n"
-                        "你可以一次调用多个互不依赖的工具来加速执行。"
+                        self.prompts.plan_executable_multi.format(
+                            count=len(executable), descs=descs
+                        )
                     )
-            system_parts.append(
-                "\n**你必须通过调用工具来完成计划中的每一步。不要跳过步骤，不要直接回复文本。**"
-            )
-            system_parts.append(
-                "\n请**只输出**工具调用 JSON，不要附带任何解释文字。"
-            )
+            system_parts.append(self.prompts.plan_must_call_tools)
+            system_parts.append(self.prompts.plan_json_only)
 
         # 注入工具描述
-        system_parts.append("\n## 可用工具\n" + self.tool_registry.describe_for_prompt())
+        system_parts.append(self.prompts.tools_section_header + self.tool_registry.describe_for_prompt())
 
         # 注入技能元数据（渐进式披露第一层：name + description）
         if self.config.enable_skills and self.skill_registry:
@@ -1241,19 +1235,11 @@ class Agent:
                 system_parts.append("\n" + skills_desc)
 
         # 工具调用格式（根据是否有计划使用不同措辞）
+        system_parts.append(self.prompts.tool_call_format_section)
         if self.current_plan:
-            system_parts.append(
-                "\n## 工具调用格式\n"
-                "请使用以下 JSON 格式调用工具（仅输出 JSON，不要附带文本）：\n"
-                '{"tool_call": {"name": "工具名", "arguments": {"参数": "值"}}}'
-            )
+            system_parts.append(self.prompts.tool_call_format_with_plan)
         else:
-            system_parts.append(
-                "\n## 工具调用格式\n"
-                "当你需要调用工具时，请使用以下 JSON 格式：\n"
-                '{"tool_call": {"name": "工具名", "arguments": {"参数": "值"}}}\n'
-                "如果不需要调用工具，直接回复用户即可。"
-            )
+            system_parts.append(self.prompts.tool_call_format_no_plan)
 
         messages.append({
             "role": "system",
@@ -1546,20 +1532,16 @@ class Agent:
         return [
             {
                 "role": "system",
-                "content": (
-                    "所有计划步骤已完成。请根据工具执行结果，生成一个清晰、完整的总结回复。"
-                ),
+                "content": self.prompts.summary_system,
             },
             {
                 "role": "user",
-                "content": (
-                    f"用户原始请求: {self.working.current_task}\n\n"
-                    f"已完成步骤:\n" +
-                    "\n".join(
+                "content": self.prompts.summary_user.format(
+                    task=self.working.current_task,
+                    steps="\n".join(
                         f"- {sr['step']}: {sr['result'][:300]}"
                         for sr in self.working.get_step_results()
-                    ) +
-                    "\n\n请总结回复用户。"
+                    ),
                 ),
             },
         ]
@@ -1569,16 +1551,13 @@ class Agent:
         logger.warning(f"达到最大迭代次数 {self.config.max_iterations}，强制结束")
         try:
             messages = [
-                {
-                    "role": "system",
-                    "content": "请根据已获得的信息，给用户一个简洁的总结回复。",
-                },
-                {"role": "user", "content": "请总结当前任务的进展情况。"},
+                {"role": "system", "content": self.prompts.force_summary_system},
+                {"role": "user", "content": self.prompts.force_summary_user},
             ]
             response = self._call_llm(messages)
-            return response.content or "任务已达到最大执行轮次，部分步骤可能未完成。"
+            return response.content or self.prompts.force_summary_fallback
         except Exception:
-            return "任务已达到最大执行轮次，部分步骤可能未完成。请尝试简化请求后重试。"
+            return self.prompts.force_summary_fallback_retry
 
     def _call_llm(self, messages: list[dict]) -> LLMResponse:
         """调用 LLM（非流式），带重试。如果设置了 on_token 则自动切换流式"""
@@ -1611,9 +1590,9 @@ class Agent:
                 if attempt < max_retries - 1:
                     time.sleep(2)
                 else:
-                    return LLMResponse(content=f"抱歉，LLM 调用失败: {e}")
+                    return LLMResponse(content=self.prompts.fallback_llm_error.format(error=e))
 
-        return LLMResponse(content="抱歉，暂时无法处理你的请求。")
+        return LLMResponse(content=self.prompts.fallback_unavailable)
 
     def _call_llm_stream(self, messages: list[dict]) -> LLMResponse:
         """流式调用 LLM，逐 token 推送"""
@@ -1671,9 +1650,9 @@ class Agent:
                 if attempt < max_retries - 1:
                     time.sleep(2)
                 else:
-                    return LLMResponse(content=f"抱歉，LLM 调用失败: {e}")
+                    return LLMResponse(content=self.prompts.fallback_llm_error.format(error=e))
 
-        return LLMResponse(content="抱歉，暂时无法处理你的请求。")
+        return LLMResponse(content=self.prompts.fallback_unavailable)
 
     def _simple_chat(self, messages: list[dict]) -> str:
         """简化的聊天接口（给 Planner 用的）"""
