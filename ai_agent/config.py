@@ -30,6 +30,7 @@ class AgentConfig:
     max_tool_calls_per_iteration: int = 3
     max_parallel_tools: int = 5       # 并发工具执行的最大线程数
     parallel_tool_execution: bool = True  # 是否启用并发工具执行
+    auto_approve: bool = False  # 是否自动批准所有工具操作（跳过确认）
     verbose: bool = True              # 打印详细日志
 
     # 规划配置

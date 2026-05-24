@@ -21,6 +21,7 @@ from ai_agent.utils.security import check_command, check_path
         {"name": "timeout", "type": "number", "description": "超时秒数，默认30（background=True 时忽略）", "required": False},
         {"name": "background", "type": "boolean", "description": "是否后台异步执行，默认 false", "required": False},
     ],
+    requires_approval=True,
 )
 def run_shell_command(
     command: str,

@@ -202,6 +202,7 @@ def poll_process(pid: int) -> str:
     params=[
         {"name": "pid", "type": "number", "description": "要终止的进程 PID", "required": True},
     ],
+    requires_approval=True,
 )
 def kill_process(pid: int) -> str:
     """终止后台进程"""

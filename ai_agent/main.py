@@ -464,6 +464,30 @@ def interactive_mode(agent: Agent) -> None:
     if agent.config.auto_resume:
         resumed = agent.resume_last_session()
 
+    # 工具确认回调（交互模式）
+    _confirm_approved_all = False  # 当前会话是否已批准全部后续操作
+
+    def _on_confirm(tool_name: str, prompt: str) -> bool:
+        """交互式工具确认：y=批准 n=拒绝 A=本次会话全部批准"""
+        nonlocal _confirm_approved_all
+        if _confirm_approved_all:
+            return True
+        if agent.config.auto_approve:
+            return True
+
+        print(f"\n{_icon('⚠️', '[!]')} 需要确认操作:")
+        print(f"   {prompt}")
+        try:
+            choice = input(f"   是否执行？ [y=是 / n=否 / A=本次全部批准]: ").strip()
+            if choice.lower() == "a":
+                _confirm_approved_all = True
+                return True
+            return choice.lower() == "y"
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    agent.on_confirm = _on_confirm
+
     sep = "=" * 60 if _use_color else "-" * 60
     print(f"\n{sep}")
     print(f"{_icon('🤖', '[AI Agent]')} AI Agent (模型: {agent.llm.model_name})")
@@ -1070,6 +1094,11 @@ def main():
         default=None,
         help="禁用彩色/emoji 输出（适合 CI/管道场景）",
     )
+    parser.add_argument(
+        "--auto-approve", "-y",
+        action="store_true",
+        help="自动批准所有工具操作（跳过确认提示）",
+    )
 
     args = parser.parse_args()
 
@@ -1166,6 +1195,8 @@ def main():
         agent.config.enable_planning = False
     if args.no_resume:
         agent.config.auto_resume = False
+    if args.auto_approve:
+        agent.config.auto_approve = True
 
     if args.query:
         # 单次查询模式

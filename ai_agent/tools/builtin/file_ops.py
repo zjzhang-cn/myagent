@@ -60,6 +60,7 @@ def read_file(path: str = ".", start_line: int | None = None, end_line: int | No
         {"name": "content", "type": "string", "description": "要写入的内容", "required": True},
         {"name": "mode", "type": "string", "description": "写入模式: 'w'=覆盖, 'a'=追加", "required": False},
     ],
+    requires_approval=True,
 )
 def write_file(path: str = ".", content: str = "", mode: str = "w") -> str:
     """写入文件（路径受沙箱限制）"""
@@ -141,6 +142,7 @@ def list_directory(path: str = ".", pattern: str = "*") -> str:
     params=[
         {"name": "path", "type": "string", "description": "要删除的文件路径", "required": True},
     ],
+    requires_approval=True,
 )
 def delete_file(path: str = ".") -> str:
     """删除文件（路径受沙箱限制）"""

@@ -224,6 +224,7 @@ class Agent:
         on_step: Callable[[str, dict], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        on_confirm: Callable[[str, str], bool] | None = None,
     ):
         """
         Args:
@@ -237,6 +238,8 @@ class Agent:
                      设置后将使用流式模式，在 LLM 推理时逐 token 推送
             on_thinking: 流式推理回调 (thinking: str) -> None
                      当模型支持 think 时，逐 token 推送推理内容
+            on_confirm: 工具确认回调 (tool_name: str, prompt: str) -> bool
+                     返回 True 批准执行，False 拒绝。不设置时根据 auto_approve 决定
         """
         self.config = config or AgentConfig()
 
@@ -337,6 +340,7 @@ class Agent:
         self.on_step = on_step
         self.on_token = on_token
         self.on_thinking = on_thinking
+        self.on_confirm = on_confirm
 
     # ----------------------------------------------------------
     # LLM provider 路由
@@ -519,6 +523,42 @@ class Agent:
                         })
 
                 if tool_infos:
+                    # 检查需要用户确认的工具
+                    approval_needed = [
+                        ti for ti in tool_infos
+                        if self.tool_registry.get(ti["name"]) and
+                        self.tool_registry.get(ti["name"]).requires_approval
+                    ]
+                    for ti in approval_needed:
+                        prompt = (
+                            f"工具: {ti['name']}\n"
+                            f"参数: {json.dumps(ti['arguments'], ensure_ascii=False, indent=2)}\n"
+                            f"该操作可能影响文件系统或系统状态，是否允许执行？"
+                        )
+                        if self.on_confirm:
+                            approved = self.on_confirm(ti["name"], prompt)
+                        elif self.config.auto_approve:
+                            approved = True
+                        else:
+                            approved = False
+
+                        if not approved:
+                            logger.warning(f"用户拒绝执行工具: {ti['name']}")
+                            ti["_denied"] = True
+
+                    # 过滤被拒绝的工具
+                    denied = [ti for ti in tool_infos if ti.get("_denied")]
+                    if denied:
+                        for ti in denied:
+                            denied_msg = f"工具执行被用户拒绝: {ti['name']}"
+                            self.short_term.add_tool_result(
+                                ti["name"], denied_msg, tool_call_id=ti["id"]
+                            )
+                        tool_infos = [ti for ti in tool_infos if not ti.get("_denied")]
+
+                    if not tool_infos:
+                        continue  # 所有工具被拒绝，回到思考阶段
+
                     self._no_toolcall_streak = 0  # 重置连续无工具调用计数
                     step.action = "; ".join(
                         f"{ti['name']}({json.dumps(ti['arguments'], ensure_ascii=False)})"

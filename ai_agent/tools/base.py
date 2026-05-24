@@ -26,6 +26,7 @@ class ToolDefinition:
     description: str
     parameters: list[ToolParameter] = field(default_factory=list)
     handler: Callable[..., Any] | None = None
+    requires_approval: bool = False  # 是否需要用户确认后才能执行
 
     def to_openai_schema(self) -> dict:
         """生成 OpenAI 兼容的 function schema"""
@@ -83,6 +84,7 @@ def tool(
     name: str,
     description: str,
     params: list[dict] | None = None,
+    requires_approval: bool = False,
 ):
     """装饰器：将函数注册为工具
 
@@ -120,6 +122,7 @@ def tool(
             description=description,
             parameters=tool_params,
             handler=func,
+            requires_approval=requires_approval,
         )
         return func
 
