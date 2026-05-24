@@ -216,6 +216,12 @@ class PromptsConfig:
 
     confirm_tool_denied: str = "工具执行被用户拒绝: {tool_name}"
 
+    confirm_path_sandbox_bypass: str = (
+        "路径沙箱拦截: {reason}\n"
+        "路径: {path}\n"
+        "是否允许本次访问？"
+    )
+
     # ============================================================
     # 错误收集（Agent._collect_failed_steps_info）
     # ============================================================

@@ -14,6 +14,7 @@ import shlex
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ def sandbox_path(
     allowed_dirs: list[str],
     must_exist: bool = False,
     for_write: bool = False,
+    security_ctx: "SecurityContext | None" = None,
 ) -> str:
     """
     解析并验证路径是否在允许的目录内。
@@ -105,6 +107,10 @@ def sandbox_path(
             continue
 
     if not is_within_allowed:
+        # 检查权限回调
+        if security_ctx and security_ctx.on_permission_denied:
+            if security_ctx.on_permission_denied(path, f"路径 '{path}' 不在允许的目录范围内"):
+                return normalized
         raise PermissionError(
             f"路径访问被拒绝：'{path}' 不在允许的目录范围内（路径遍历检测）。\n"
             f"  规范化路径: {normalized}\n"
@@ -146,6 +152,9 @@ def sandbox_path(
             continue
 
     if not is_allowed:
+        if security_ctx and security_ctx.on_permission_denied:
+            if security_ctx.on_permission_denied(path, f"路径 '{path}' 解析后不在允许的目录范围内"):
+                return real_path
         raise PermissionError(
             f"路径访问被拒绝：'{path}' 的真实路径不在允许的目录范围内。\n"
             f"  解析后路径: {real_path}\n"
@@ -159,6 +168,9 @@ def sandbox_path(
         for part in path_parts:
             if part.startswith(".") and part not in (".", ".."):
                 if part in (".git", ".ssh", ".gnupg", ".config", ".local"):
+                    if security_ctx and security_ctx.on_permission_denied:
+                        if security_ctx.on_permission_denied(path, f"写入隐藏目录 '{part}' 被拦截"):
+                            return real_path
                     raise PermissionError(
                         f"写入操作被拒绝：不允许修改 '{part}' 目录中的文件。"
                         f"这是系统或配置目录，修改可能导致安全问题。"
@@ -275,6 +287,8 @@ class SecurityContext:
     allow_all_commands: bool = False
     max_file_read_bytes: int = 1_000_000  # 读文件最大字节数
     enabled: bool = True  # 是否启用安全检查
+    on_permission_denied: Callable[[str, str], bool] | None = None
+    """权限拒绝回调 (path, reason) -> bool。返回 True 允许本次操作"""
 
 
 _security_context = threading.local()
@@ -316,7 +330,7 @@ def check_path(path: str, must_exist: bool = False, for_write: bool = False) -> 
     ctx = get_security_context()
     if not ctx.enabled:
         return os.path.abspath(os.path.expanduser(path))
-    return sandbox_path(path, ctx.allowed_directories, must_exist, for_write)
+    return sandbox_path(path, ctx.allowed_directories, must_exist, for_write, security_ctx=ctx)
 
 
 def check_command(command: str) -> tuple[bool, str]:

@@ -1724,7 +1724,7 @@ class Agent:
     def _build_security_context(self) -> SecurityContext:
         """根据当前配置构建安全上下文"""
         from ai_agent.utils.security import get_allowed_directories
-        return SecurityContext(
+        ctx = SecurityContext(
             allowed_directories=get_allowed_directories(
                 self.config.workspace_directories
             ),
@@ -1732,6 +1732,17 @@ class Agent:
             allow_all_commands=self.config.shell_allow_all_commands,
             enabled=True,
         )
+        # 设置权限拒绝回调，委托给 on_confirm
+        if self.on_confirm:
+            ctx.on_permission_denied = lambda path, reason: self.on_confirm(
+                "path_sandbox",
+                f"路径沙箱拦截: {reason}\n"
+                f"路径: {path}\n"
+                f"是否允许本次访问？"
+            )
+        elif self.config.auto_approve:
+            ctx.on_permission_denied = lambda path, reason: True
+        return ctx
 
     def _execute_tools_sequential(self, tool_infos: list[dict]) -> list[str]:
         """顺序执行工具，返回结果列表（顺序与输入一致）"""
