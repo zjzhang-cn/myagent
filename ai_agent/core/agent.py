@@ -547,17 +547,16 @@ class Agent:
                             ti["_denied"] = True
 
                     # 过滤被拒绝的工具
-                    denied = [ti for ti in tool_infos if ti.get("_denied")]
-                    if denied:
-                        for ti in denied:
-                            denied_msg = f"工具执行被用户拒绝: {ti['name']}"
-                            self.short_term.add_tool_result(
-                                ti["name"], denied_msg, tool_call_id=ti["id"]
-                            )
+                    denied_names = [ti["name"] for ti in tool_infos if ti.get("_denied")]
+                    if denied_names:
+                        logger.warning(f"用户拒绝执行工具: {', '.join(denied_names)}")
                         tool_infos = [ti for ti in tool_infos if not ti.get("_denied")]
 
                     if not tool_infos:
-                        continue  # 所有工具被拒绝，回到思考阶段
+                        # 所有工具被拒绝，注入提示让 LLM 知道并重新思考
+                        denied_hint = f"[系统通知] 以下工具被用户拒绝执行: {', '.join(denied_names)}。请尝试替代方案或请求用户澄清。"
+                        self.short_term.add_assistant(denied_hint)
+                        continue  # 回到思考阶段
 
                     self._no_toolcall_streak = 0  # 重置连续无工具调用计数
                     step.action = "; ".join(
