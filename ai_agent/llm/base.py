@@ -43,6 +43,49 @@ class StreamEvent:
     usage: dict = field(default_factory=dict)  # token 用量统计
 
 
+class LLMResponse:
+    """标准化的 LLM 非流式响应
+
+    统一 OpenAI 和 Anthropic 的响应格式，方便 Agent 层统一处理。
+
+    Attributes:
+        content: 模型输出的文本内容
+        thinking: 模型的内部推理过程（如 DeepSeek-R1 的 reasoning_content）
+        thinking_signature: 推理签名（Anthropic 扩展思考专用，要求原样传回）
+        tool_calls: 解析后的工具调用列表 [{"name": "...", "arguments": {...}}, ...]
+        finish_reason: 结束原因（"stop" / "tool_calls" / "length" / "end_turn"）
+        usage: token 用量统计
+    """
+
+    def __init__(
+        self,
+        content: str = "",
+        thinking: str = "",
+        thinking_signature: str = "",
+        tool_calls: list[dict] | None = None,
+        finish_reason: str = "stop",
+        usage: dict | None = None,
+    ):
+        self.content = content                  # 模型输出的文本
+        self.thinking = thinking                # 推理过程（DeepSeek-R1 等）
+        self.thinking_signature = thinking_signature  # Anthropic 推理签名
+        self.tool_calls = tool_calls or []      # 工具调用列表
+        self.finish_reason = finish_reason      # 结束原因
+        self.usage = usage or {}                # token 用量
+
+    def has_tool_calls(self) -> bool:
+        """是否包含工具调用"""
+        return len(self.tool_calls) > 0
+
+    def __repr__(self):
+        return (
+            f"LLMResponse(content={self.content[:80]!r}, "
+            f"thinking={self.thinking[:40]!r}, "
+            f"tool_calls={len(self.tool_calls)}, "
+            f"finish={self.finish_reason})"
+        )
+
+
 class BaseLLM(ABC):
     """LLM 抽象基类，定义统一的调用接口
 
@@ -105,46 +148,3 @@ class BaseLLM(ABC):
     def model_name(self) -> str:
         """当前使用的模型名"""
         ...
-
-
-class LLMResponse:
-    """标准化的 LLM 非流式响应
-
-    统一 OpenAI 和 Anthropic 的响应格式，方便 Agent 层统一处理。
-
-    Attributes:
-        content: 模型输出的文本内容
-        thinking: 模型的内部推理过程（如 DeepSeek-R1 的 reasoning_content）
-        thinking_signature: 推理签名（Anthropic 扩展思考专用，要求原样传回）
-        tool_calls: 解析后的工具调用列表 [{"name": "...", "arguments": {...}}, ...]
-        finish_reason: 结束原因（"stop" / "tool_calls" / "length" / "end_turn"）
-        usage: token 用量统计
-    """
-
-    def __init__(
-        self,
-        content: str = "",
-        thinking: str = "",
-        thinking_signature: str = "",
-        tool_calls: list[dict] | None = None,
-        finish_reason: str = "stop",
-        usage: dict | None = None,
-    ):
-        self.content = content                  # 模型输出的文本
-        self.thinking = thinking                # 推理过程（DeepSeek-R1 等）
-        self.thinking_signature = thinking_signature  # Anthropic 推理签名
-        self.tool_calls = tool_calls or []      # 工具调用列表
-        self.finish_reason = finish_reason      # 结束原因
-        self.usage = usage or {}                # token 用量
-
-    def has_tool_calls(self) -> bool:
-        """是否包含工具调用"""
-        return len(self.tool_calls) > 0
-
-    def __repr__(self):
-        return (
-            f"LLMResponse(content={self.content[:80]!r}, "
-            f"thinking={self.thinking[:40]!r}, "
-            f"tool_calls={len(self.tool_calls)}, "
-            f"finish={self.finish_reason})"
-        )

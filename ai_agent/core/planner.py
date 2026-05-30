@@ -350,7 +350,6 @@ class Planner:
             tools_description: 可用工具的描述文本（注入到规划提示词中）
             skill_registry: 技能注册表（提供后会在规划提示词中注入技能元数据）
             prompts: 提示词配置（自定义规划相关的提示词模板）
-        """
             skill_registry: 技能注册表（可选），提供后启用技能匹配快速路径
             prompts: 提示词配置（可选，默认使用 PromptsConfig()）
         """
