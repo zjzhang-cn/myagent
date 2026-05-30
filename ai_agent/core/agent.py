@@ -1,10 +1,24 @@
 """
 核心 Agent 循环（ReAct 模式）
 
-Agent 运行流程：
-1. 接收用户输入 → 检查是否需要规划
-2. ReAct 循环：思考(Think) → 行动(Act) → 观察(Observe) → 反思(Reflect)
-3. 返回最终结果
+Agent 是框架的中枢，负责协调 LLM、工具、规划器和记忆系统。
+运行流程：
+
+    用户输入 → [复杂度评估 → 任务规划] → ReAct 循环 ──→ 最终输出
+                     ↑                        │
+                     Planner              ToolRegistry
+                   (任务分解)          (工具注册与执行)
+                                            │
+                          ┌─────────────────┼─────────────────┐
+                          ▼                 ▼                  ▼
+                     安全沙箱          并发执行            错误检测
+                   (路径/命令校验)  (ThreadPool)    (分类+replan)
+
+ReAct 循环（Think→Act→Observe→Reflect）：
+    1. Think    — LLM 评估对话历史和工具定义，决定调用工具还是直接回复
+    2. Act      — 执行工具调用（顺序执行，或通过 ThreadPoolExecutor 并发执行独立工具）
+    3. Observe  — 工具执行结果注入回对话历史
+    4. Reflect  — LLM 查看观察结果，检查计划是否完成，失败时触发重新规划
 """
 
 import base64
@@ -36,7 +50,21 @@ from ai_agent.utils.token_utils import estimate_message_tokens, estimate_message
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# Agent 状态枚举
+# ============================================================
+
 class AgentState(str, Enum):
+    """Agent 生命周期状态
+
+    IDLE      — 空闲，等待用户输入
+    PLANNING  — 正在分解任务为执行步骤
+    THINKING  — 正在调用 LLM 进行推理
+    ACTING    — 正在执行工具调用
+    OBSERVING — 正在处理工具执行结果
+    DONE      — 任务完成
+    ERROR     — 发生错误
+    """
     IDLE = "idle"
     PLANNING = "planning"
     THINKING = "thinking"
@@ -48,7 +76,18 @@ class AgentState(str, Enum):
 
 @dataclass
 class AgentStep:
-    """Agent 单次循环记录"""
+    """Agent 单次 ReAct 循环的记录
+
+    用于追踪和展示 Agent 的思考过程。每次迭代产生一个 AgentStep。
+
+    Attributes:
+        iteration: 迭代编号
+        state: 当前状态
+        thought: LLM 的思考内容
+        action: 执行的工具调用描述
+        observation: 工具执行结果摘要
+        timestamp: 时间戳
+    """
     iteration: int
     state: AgentState
     thought: str = ""
@@ -59,7 +98,16 @@ class AgentStep:
 
 @dataclass
 class AgentResult:
-    """Agent 执行结果"""
+    """Agent 执行结果
+
+    Attributes:
+        success: 是否成功完成
+        answer: 最终回复文本
+        steps: 每次迭代的详细记录
+        plan: 执行的计划（如果有规划）
+        iterations: 总迭代次数
+        elapsed_seconds: 总耗时（秒）
+    """
     success: bool
     answer: str
     steps: list[AgentStep] = field(default_factory=list)
@@ -68,15 +116,32 @@ class AgentResult:
     elapsed_seconds: float = 0.0
 
 
+# ============================================================
+# 工具调用解析器 — 多级回退策略
+# ============================================================
+
 class ToolCallParser:
-    """解析 LLM 响应中的工具调用（支持多种格式）"""
+    """解析 LLM 响应中的工具调用（支持多种格式）
+
+    解析策略（按优先级）：
+        1. 从 Markdown 代码块中提取 JSON tool_call
+        2. 从原始文本中提取 JSON tool_call（处理嵌套括号）
+        3. 解析中文函数调用风格文本（如 "调用工具: search_web(query=...)"）
+
+    这种多级回退策略确保即使 LLM 不支持原生 Function Calling，
+    也能通过文本解析正常使用工具。
+    """
 
     @classmethod
     def parse(cls, text: str) -> list[dict]:
-        """从文本中提取工具调用列表"""
+        """从 LLM 输出文本中提取工具调用列表
+
+        返回格式: [{"name": "工具名", "arguments": {"参数": "值"}}, ...]
+        """
         tool_calls = []
 
         # 方法 1: 从 markdown 代码块中提取 JSON
+        # 匹配 ```json ... ``` 或 ``` ... ``` 块
         code_blocks = re.findall(
             r'```(?:json)?\s*\n?([\s\S]*?)\n?```', text
         )
@@ -89,7 +154,8 @@ class ToolCallParser:
             # 方法 2: 从原始文本中提取 JSON tool_call
             tool_calls = cls._extract_json_tool_calls(text)
 
-        # 方法 3: 函数调用风格（如果前两种都没匹配到）
+        # 方法 3: 中文函数调用风格（如果前两种都没匹配到）
+        # 匹配 "调用工具: tool_name(arg1=val1, arg2=val2)"
         if not tool_calls:
             tool_calls = cls._parse_function_style(text)
 
@@ -97,7 +163,14 @@ class ToolCallParser:
 
     @classmethod
     def _extract_json_tool_calls(cls, text: str) -> list[dict]:
-        """从文本中提取 JSON 格式的 tool_call"""
+        """从文本中提取 JSON 格式的 tool_call
+
+        支持两种 JSON 结构：
+            {"tool_call": {"name": "...", "arguments": {...}}}
+            {"name": "...", "arguments": {...}}
+
+        也支持 tool_call 为数组的形式（多个工具调用）。
+        """
         tool_calls = []
         for json_obj in cls._find_json_objects(text, key_hint="tool_call"):
             try:
@@ -116,7 +189,17 @@ class ToolCallParser:
 
     @classmethod
     def _find_json_objects(cls, text: str, key_hint: str = "") -> list[str]:
-        """在文本中定位完整的 JSON 对象（处理嵌套括号）"""
+        """在文本中定位完整的 JSON 对象（正确处理嵌套括号和字符串）
+
+        使用计数器跟踪嵌套深度，避免被字符串内的花括号干扰。
+        key_hint 用于快速过滤：如果附近没有提示关键词，跳过当前片段（性能优化）。
+
+        核心算法：
+            1. 找到 { 起始位置
+            2. 用 depth 计数器匹配 {} 对（跳过字符串和转义字符）
+            3. depth 归零时完成一个 JSON 对象
+            4. 用 json.loads 验证有效性
+        """
         results = []
         idx = 0
         while True:
@@ -168,7 +251,15 @@ class ToolCallParser:
 
     @classmethod
     def _parse_function_style(cls, text: str) -> list[dict]:
-        """解析 '调用工具: tool_name(arg1=val1)' 风格的文本"""
+        """解析中文函数调用风格文本 — 第三级回退策略
+
+        匹配模式：
+            "调用工具: tool_name(arg1=val1)"
+            "calling 工具: tool_name(arg1=val1)"
+            "使用/执行 工具: tool_name(arg1=val1)"
+
+        参数值支持双引号、单引号和不带引号三种格式。
+        """
         pattern = re.compile(
             r'(?:调用|calling|使用|执行)\s*(?:工具\s*)?[：:]\s*(\w+)\s*\(\s*([^)]*)\s*\)',
         )
@@ -188,7 +279,11 @@ class ToolCallParser:
 
     @staticmethod
     def _normalize(tc: dict) -> dict:
-        """标准化工具调用格式"""
+        """标准化工具调用格式
+
+        确保 arguments 是 dict 类型（LLM 可能返回 JSON 字符串）。
+        返回: {"name": "工具名", "arguments": {"参数": "值"}}
+        """
         args = tc.get("arguments", {})
         if isinstance(args, str):
             try:
@@ -199,7 +294,11 @@ class ToolCallParser:
 
 
 def _find_prev_assistant_in_list(messages: list[dict]) -> dict | None:
-    """从消息列表末尾向前查找最近的一个 assistant(tool_calls) 消息"""
+    """从消息列表末尾向前查找最近的一个 assistant(tool_calls) 消息
+
+    用于消息验证：确保 tool 角色消息之前有对应的 assistant(tool_calls) 消息。
+    OpenAI API 要求 assistant(tool_calls) 和 tool 消息必须成对出现。
+    """
     for m in reversed(messages):
         if m.get("role") == "assistant" and m.get("tool_calls"):
             return m
@@ -207,12 +306,36 @@ def _find_prev_assistant_in_list(messages: list[dict]) -> dict | None:
 
 
 class Agent:
-    """AI Agent 主类
+    """AI Agent 主类 — 框架的核心中枢
+
+    负责协调 LLM 推理、工具执行、任务规划和记忆管理，运行 ReAct 循环。
+
+    架构要点：
+        • LLM 后端路由 — 根据 llm_type 配置自动选择 OpenAI 或 Anthropic
+        • 三层记忆 — 短期(滑动窗口) + 工作(任务状态) + 长期(SQLite+语义搜索)
+        • 工具系统 — 动态加载 + 安全沙箱 + 并发执行
+        • 技能系统 — Claude Code Skills 规范，渐进式披露
+        • 规划器 — 复杂度评估 → 任务分解 → 动态重规划
+        • 错误恢复 — 失败步骤触发 replan，最多 max_replan_attempts 次
+        • 会话持久化 — JSON 序列化，自动快照 + 恢复
 
     使用示例:
-        agent = Agent(config=AgentConfig())
-        result = agent.run("帮我搜索一下今天的天气，然后保存到文件")
+        from ai_agent import Agent, AgentConfig
+
+        # 最简单用法
+        agent = Agent(AgentConfig(model="deepseek-v4-flash"))
+        result = agent.run("帮我搜索今天的天气")
         print(result.answer)
+
+        # 自定义工具
+        from ai_agent.tools.base import tool
+
+        @tool(name="hello", description="打招呼", params=[])
+        def hello() -> str:
+            return "你好！"
+
+        agent.add_tool(hello)
+        result = agent.run("跟我打个招呼")
     """
 
     def __init__(
@@ -228,18 +351,17 @@ class Agent:
     ):
         """
         Args:
-            config: Agent 配置
-            llm: LLM 实例
-            tool_registry: 工具注册表
-            skill_registry: 技能注册表（可选），提供后启用技能匹配规划
-            on_step: 步骤回调 (event_type, data) -> None
-                     event_type: "planning" | "thinking" | "acting" | "observing" | "done" | "token"
-            on_token: 流式 token 回调 (token: str) -> None
-                     设置后将使用流式模式，在 LLM 推理时逐 token 推送
-            on_thinking: 流式推理回调 (thinking: str) -> None
-                     当模型支持 think 时，逐 token 推送推理内容
-            on_confirm: 工具确认回调 (tool_name: str, prompt: str) -> bool
-                     返回 True 批准执行，False 拒绝。不设置时根据 auto_approve 决定
+            config: Agent 配置对象。留空使用默认配置（模型 deepseek-v4-flash）
+            llm: LLM 实例。留空则根据 config.llm_type 自动创建
+            tool_registry: 工具注册表。留空使用全局默认注册表（含内置工具）
+            skill_registry: 技能注册表。留空自动创建并从默认目录加载技能
+            on_step: 步骤回调 (event_type, data)。
+                     event_type: "start" | "planning" | "thinking" | "acting" | "observing" | "done"
+            on_token: 流式 token 回调 (token: str)。设置后将启用流式模式
+            on_thinking: 流式推理回调 (thinking: str)。模型推理内容逐 token 推送
+            on_confirm: 工具确认回调 (tool_name, prompt) → bool。
+                        返回 True 批准执行，False 拒绝。
+                        不设置时根据 auto_approve 自动决定
         """
         self.config = config or AgentConfig()
 
@@ -384,11 +506,23 @@ class Agent:
         """
         执行 Agent 主循环
 
+        完整的执行流程：
+            1. 重置状态计数器，将用户输入加入短期记忆
+            2. 检索长期记忆中的相关知识
+            3. 评估任务复杂度，决定是否启动规划器
+            4. 进入 ReAct 循环：
+                a. Think  — 构建消息，调用 LLM 进行推理
+                b. Act   — 解析工具调用，并发/顺序执行工具
+                c. Observe — 处理工具结果，更新计划步骤状态
+                d. Reflect — 检查计划进度，失败时触发重新规划
+            5. 计划完成或达到上限时，生成最终总结
+            6. 保存重要内容到长期记忆，自动保存会话状态
+
         Args:
-            user_input: 用户输入
+            user_input: 用户输入的自然语言请求
 
         Returns:
-            AgentResult: 执行结果
+            AgentResult: 执行结果，包含最终回答、迭代记录、计划和耗时
         """
         start_time = time.time()
         steps: list[AgentStep] = []
@@ -860,7 +994,18 @@ class Agent:
             self.add_skill(skill)
 
     def _register_use_skill_tool(self) -> None:
-        """注册 use_skill 内置工具，让 LLM 可以按名称加载完整技能内容"""
+        """注册 use_skill 内置工具
+
+        这是技能系统渐进式披露的关键机制：
+            第一层 — 技能元数据（name + description）注入系统提示词
+            第二层 — LLM 判断技能匹配后，调用此工具加载完整的 Skill.md 内容
+
+        工作流程：
+            1. LLM 看到系统提示词中的技能描述列表
+            2. 判断某个技能与当前任务匹配
+            3. 调用 use_skill(skill_name="xxx") 获取完整指导
+            4. Agent 将技能内容注入对话上下文，指导后续工具调用
+        """
         from ai_agent.tools.base import tool
 
         skill_registry = self.skill_registry  # 闭包捕获
@@ -1233,7 +1378,17 @@ class Agent:
     # ----------------------------------------------------------
 
     def _build_messages(self) -> list[dict]:
-        """构建发送给 LLM 的消息列表（含上下文窗口裁剪）"""
+        """构建发送给 LLM 的消息列表（含上下文窗口裁剪）
+
+        消息结构（优先级从高到低）：
+            1. 系统提示词（角色定义 + 行为准则）
+            2. 计划进度（当前步骤、可执行步骤、强制工具调用指令）
+            3. 可用工具列表 + 工具调用格式说明
+            4. 技能元数据摘要（渐进式披露第一层）
+            5. 短期记忆中的对话历史（用户消息 + LLM 回复 + 工具结果）
+
+        构建完成后会检查 token 数是否超限，超限则自动裁剪旧消息。
+        """
         messages = []
 
         # 系统提示词

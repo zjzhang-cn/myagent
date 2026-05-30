@@ -1,5 +1,24 @@
 """
-工具注册中心
+工具注册中心 — 工具全生命周期管理
+
+ToolRegistry 是工具系统的核心，负责：
+    • 注册/注销 — register() / unregister() 管理工具定义
+    • 查询 — get() / list_tools() / list_definitions() 获取工具信息
+    • 执行 — execute() 安全执行工具并捕获异常
+    • Schema 生成 — to_openai_schemas() 生成 OpenAI Function Calling 格式
+    • 动态加载 — load_tools_from_directory() 从目录自动发现 @tool 函数
+
+使用方式：
+    from ai_agent.tools.registry import ToolRegistry
+    from ai_agent.tools.base import tool
+
+    @tool(name="hello", description="打招呼", params=[])
+    def hello() -> str:
+        return "你好！"
+
+    registry = ToolRegistry()
+    registry.register_function(hello)
+    result = registry.execute("hello", {})
 """
 
 import importlib.util
@@ -16,49 +35,83 @@ logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
-    """工具注册表，管理所有可用工具"""
+    """工具注册表 — 管理所有可用工具
+
+    核心职责：
+        1. 维护工具名称 → ToolDefinition 的映射表
+        2. 生成 OpenAI 兼容的 function schema（用于 Function Calling）
+        3. 安全执行工具调用（参数校验 + 异常捕获）
+        4. 动态从目录加载 @tool 装饰的 Python 文件
+
+    线程安全：使用 dict 作为存储，register/unregister 应在初始化阶段完成。
+    执行阶段仅读取，多线程并发安全。
+    """
 
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
 
     def register(self, definition: ToolDefinition) -> None:
-        """注册工具定义"""
+        """注册工具定义（直接传入 ToolDefinition 对象）"""
         self._tools[definition.name] = definition
         logger.debug(f"工具已注册: {definition.name}")
 
     def register_tool_instance(self, tool: BaseTool) -> None:
-        """注册工具实例"""
+        """注册工具实例（从 BaseTool 子类）"""
         self.register(tool.definition())
 
     def register_function(self, func: Callable) -> None:
-        """从被 @tool 装饰的函数注册"""
+        """从被 @tool 装饰的函数注册工具
+
+        要求函数具有 _tool_definition 属性（由 @tool 装饰器设置）。
+        这是最常用的注册方式。
+        """
         if hasattr(func, "_tool_definition"):
             self.register(func._tool_definition)
         else:
             raise ValueError(f"函数 {func.__name__} 缺少 _tool_definition，请使用 @tool 装饰器")
 
     def unregister(self, name: str) -> None:
-        """注销工具"""
+        """注销工具（按名称移除）"""
         self._tools.pop(name, None)
 
     def get(self, name: str) -> ToolDefinition | None:
-        """获取工具定义"""
+        """按名称获取工具定义，不存在返回 None"""
         return self._tools.get(name)
 
     def list_tools(self) -> list[str]:
-        """列出所有工具名"""
+        """列出所有已注册的工具名称"""
         return list(self._tools.keys())
 
     def list_definitions(self) -> list[ToolDefinition]:
-        """列出所有工具定义"""
+        """列出所有已注册的工具定义对象"""
         return list(self._tools.values())
 
     def to_openai_schemas(self) -> list[dict]:
-        """生成 OpenAI tools 参数"""
+        """生成 OpenAI tools 参数的完整列表
+
+        Returns:
+            列表，每项为 {"type": "function", "function": {...}}
+            可直接传给 OpenAI chat.completions.create(tools=...)
+        """
         return [td.to_openai_schema() for td in self._tools.values()]
 
     def execute(self, name: str, arguments: dict) -> str:
-        """执行指定工具并返回结果"""
+        """执行指定工具并返回字符串结果
+
+        执行流程：
+            1. 查找工具定义（不存在返回错误提示）
+            2. 检查 handler 是否绑定
+            3. 调用 handler(**arguments)
+            4. 捕获 TypeError（参数错误）并返回友好提示
+            5. 捕获其他异常并记录完整 traceback
+
+        Args:
+            name: 工具名称
+            arguments: 参数字典（如 {"query": "天气", "max_results": 5}）
+
+        Returns:
+            执行结果字符串（成功）或错误信息字符串（失败）
+        """
         tool_def = self._tools.get(name)
         if not tool_def:
             return f"错误：未找到工具 '{name}'。可用工具: {', '.join(self.list_tools())}"

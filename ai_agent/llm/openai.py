@@ -1,9 +1,22 @@
 """
-OpenAI LLM 集成（基于官方 openai SDK）
+OpenAI LLM 集成 — 基于官方 openai SDK
 
-支持 OpenAI API 及任何 OpenAI 兼容的 API（如 Azure、DeepSeek、Moonshot 等）。
-使用 openai.OpenAI 客户端，自动处理认证、重试、流式 SSE 解析和错误格式化。
-支持将原始 LLM 响应保存到 JSONL 文件（response_log_path）。
+支持 OpenAI API 及任何 OpenAI 兼容的 API（如 Azure、DeepSeek、Moonshot、智谱等）。
+
+核心能力：
+    • 自动 Base URL 推断 — 根据模型名称自动匹配 12+ 知名平台
+    • 流式输出 — 实时逐 token 推送文本和推理内容（reasoning_content）
+    • 推理显示 — 支持 DeepSeek-R1 等推理模型的 thinking 输出
+    • 双格式工具调用 — 原生 Function Calling + 文本解析回退
+    • 错误处理 — 捕获并格式化各类 API 错误
+    • 请求日志 — 可选 JSONL 格式保存原始请求/响应
+
+使用方式：
+    from ai_agent.llm.openai import OpenAILLM
+
+    llm = OpenAILLM(model="deepseek-v4-flash")
+    response = llm.chat([{"role": "user", "content": "你好"}])
+    print(response.content)
 """
 
 import json
@@ -28,25 +41,40 @@ from ai_agent.llm.base import BaseLLM, LLMResponse, StreamEvent
 
 logger = logging.getLogger(__name__)
 
-# 常见的 OpenAI 兼容 API 基础地址（含 API 版本路径）
+# ----------------------------------------------------------
+# 已知的 OpenAI 兼容 API 基础地址映射
+# ----------------------------------------------------------
+# 根据模型名前缀自动推断 Base URL，避免用户手动配置
 KNOWN_BASE_URLS: dict[str, str | None] = {
-    "openai": "https://api.openai.com/v1",
-    "azure": None,  # Azure 需要用户指定完整 endpoint
-    "deepseek": "https://api.deepseek.com/v1",
-    "moonshot": "https://api.moonshot.cn/v1",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "siliconflow": "https://api.siliconflow.cn/v1",
-    "groq": "https://api.groq.com/openai/v1",
-    "together": "https://api.together.xyz/v1",
-    "fireworks": "https://api.fireworks.ai/inference/v1",
-    "xai": "https://api.x.ai/v1",
-    "custom": None,
+    "openai": "https://api.openai.com/v1",       # OpenAI 官方
+    "azure": None,                                # Azure 需要用户指定完整 endpoint
+    "deepseek": "https://api.deepseek.com/v1",    # DeepSeek
+    "moonshot": "https://api.moonshot.cn/v1",     # 月之暗面 Moonshot
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4", # 智谱 GLM
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1", # 阿里通义千问
+    "siliconflow": "https://api.siliconflow.cn/v1",   # 硅基流动
+    "groq": "https://api.groq.com/openai/v1",         # Groq
+    "together": "https://api.together.xyz/v1",        # Together AI
+    "fireworks": "https://api.fireworks.ai/inference/v1", # Fireworks AI
+    "xai": "https://api.x.ai/v1",                     # xAI (Grok)
+    "custom": None,                                    # 自定义，需手动指定
 }
 
 
 class OpenAILLM(BaseLLM):
-    """OpenAI API 及兼容 API 的 LLM 实现（基于 openai SDK）"""
+    """OpenAI API 及兼容 API 的 LLM 实现（基于 openai SDK）
+
+    自动处理：
+        • Base URL 推断 — 模型名前缀匹配已知平台
+        • API 密钥 — 参数 > LLM_API_KEY 环境变量
+        • 重试 — SDK 内置 max_retries
+        • 流式 SSE 解析 — 支持 reasoning_content 和 tool_calls 累积
+        • 错误格式化 — 详细的错误信息和排查建议
+
+    使用示例：
+        llm = OpenAILLM(model="gpt-4o", temperature=0.3)
+        response = llm.chat([{"role": "user", "content": "Hello"}])
+    """
 
     def __init__(
         self,
@@ -62,16 +90,16 @@ class OpenAILLM(BaseLLM):
     ):
         """
         Args:
-            model: 模型名（如 gpt-4o, deepseek-chat 等）
+            model: 模型名（如 gpt-4o, deepseek-chat, moonshot-v1 等）
             api_key: API 密钥。不提供则从 LLM_API_KEY 环境变量读取。
             base_url: API 基础地址（含版本路径，如 https://api.openai.com/v1）。
                       不提供则根据 LLM_BASE_URL 环境变量或模型名自动推断。
-            temperature: 生成温度
-            max_tokens: 最大生成 token 数
-            response_log_path: 原始响应 JSONL 文件路径
-            enable_thinking: 启用模型推理（部分模型如 o1 系列支持）
-            extra_headers: 额外的 HTTP 请求头
-            max_retries: 自动重试次数（SDK 内置）
+            temperature: 生成温度（0.0=确定性, 2.0=高随机性）
+            max_tokens: 单次生成最大 token 数
+            response_log_path: 原始响应 JSONL 文件路径（调试用）
+            enable_thinking: 启用模型推理（部分模型如 DeepSeek-R1 支持 reasoning_content）
+            extra_headers: 额外的 HTTP 请求头（如 {"X-Title": "MyApp"}）
+            max_retries: SDK 内置的自动重试次数
         """
         self._model = model
         self.temperature = temperature
@@ -404,9 +432,22 @@ class OpenAILLM(BaseLLM):
         )
 
     def _infer_base_url(self, model: str) -> str:
-        """根据模型名推断 API 基础地址"""
+        """根据模型名自动推断 API 基础地址
+
+        通过模型名前缀匹配已知平台。匹配规则优先级（从上到下）：
+            deepseek → DeepSeek（如 deepseek-v4, deepseek-chat）
+            moonshot/kimi → 月之暗面（如 moonshot-v1, kimi）
+            glm/chatglm → 智谱（如 glm-4, chatglm3）
+            qwen/qwq → 通义千问（如 qwen-max, qwq-32b）
+            siliconflow → 硅基流动
+            llama/mixtral → Together AI
+            grok → xAI
+
+        如果都不匹配，使用 LLM_BASE_URL 环境变量或 OpenAI 默认地址。
+        """
         model_lower = model.lower()
 
+        # 模型名前缀 → KNOWN_BASE_URLS 的 provider 键
         provider_patterns = [
             ("deepseek", "deepseek"),
             ("moonshot", "moonshot"),

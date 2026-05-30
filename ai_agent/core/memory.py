@@ -1,9 +1,24 @@
 """
-记忆系统：短期记忆、工作记忆、长期记忆
+记忆系统 — 三层记忆架构
 
-- ShortTermMemory: 维护最近 N 轮对话上下文
-- WorkingMemory: 存储当前任务中的中间结果和状态
-- LongTermMemory: 持久化的知识存储（文件/SQLite）
+三层记忆各司其职：
+
+    ShortTermMemory  — 短期记忆：滑动窗口对话历史（最近 N 轮）
+        存储用户消息、LLM 回复和工具执行结果，维持对话连贯性。
+        当消息超过窗口大小时，旧消息自动丢弃。
+
+    WorkingMemory    — 工作记忆：当前任务的运行时状态
+        键值存储 + 任务状态 + 步骤执行结果。
+        用于在 Agent 的不同迭代之间传递中间状态。
+
+    LongTermMemory   — 长期记忆：持久化知识存储（SQLite）
+        存储用户偏好、学习到的知识和重要对话结果。
+        支持关键词搜索和语义搜索（需要 embedding_fn）。
+
+记忆流转关系：
+    短期记忆 ←→ 对话上下文（每次 LLM 调用时读取）
+    工作记忆 ←→ 任务执行状态（跨迭代保持）
+    长期记忆 ←→ 持久化存储（跨会话保持，启动时检索相关记忆）
 """
 
 import json
@@ -22,19 +37,38 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 短期记忆
+# 消息数据结构
 # ============================================================
 
 @dataclass
 class Message:
-    """单条消息"""
-    role: str       # "user" | "assistant" | "system" | "tool"
-    content: str
-    timestamp: float = field(default_factory=time.time)
-    metadata: dict = field(default_factory=dict)
+    """单条对话消息
+
+    支持 OpenAI 和 Anthropic 两种格式的所有字段。
+
+    Attributes:
+        role: 消息角色 — "user" | "assistant" | "system" | "tool"
+        content: 消息文本内容
+        timestamp: 消息创建时间戳
+        metadata: 扩展字段，可包含：
+            - tool_calls: assistant 消息的工具调用数组（OpenAI 格式）
+            - tool_call_id: tool 消息对应的工具调用 ID（OpenAI 要求）
+            - reasoning_content: 推理模型的思考过程（DeepSeek-R1）
+            - reasoning_signature: 推理签名（Anthropic 扩展思考要求回传）
+    """
+    role: str       # 消息角色："user" | "assistant" | "system" | "tool"
+    content: str    # 消息文本内容
+    timestamp: float = field(default_factory=time.time)  # 创建时间
+    metadata: dict = field(default_factory=dict)  # 扩展字段
 
     def to_dict(self) -> dict:
-        """转为 LLM API 格式，包含 tool_calls、tool_call_id、reasoning_content"""
+        """转为 LLM API 格式（OpenAI/Anthropic 兼容）
+
+        处理的关键场景：
+            - assistant(tool_calls): 需要携带 tool_calls 数组
+            - tool 消息: 需要 tool_call_id 与 assistant 消息匹配
+            - 推理模型: reasoning_content 和 reasoning_signature 需原样传回
+        """
         d: dict = {"role": self.role, "content": self.content}
         if self.role == "assistant":
             if self.metadata.get("tool_calls"):
@@ -50,7 +84,7 @@ class Message:
         return d
 
     def to_serializable(self) -> dict:
-        """全字段序列化（含 timestamp 和完整的 metadata），用于持久化存储"""
+        """全字段序列化（含 timestamp 和完整的 metadata），用于会话持久化"""
         return {
             "role": self.role,
             "content": self.content,
@@ -70,27 +104,55 @@ class Message:
 
 
 class ShortTermMemory:
-    """短期记忆：滑动窗口对话历史"""
+    """短期记忆 — 滑动窗口对话历史
+
+    使用 collections.deque 实现固定大小的滑动窗口。
+    当消息数量超过 max_size 时，最早的消息自动淘汰。
+
+    核心方法：
+        add() / add_user() / add_assistant() / add_tool_result() — 添加消息
+        to_messages() — 转换为 LLM API 格式的消息列表
+        estimate_tokens() — 估算当前所有消息的 token 数
+        to_serializable() / from_serializable() — JSON 序列化/反序列化
+    """
 
     def __init__(self, max_size: int = 20):
+        """
+        Args:
+            max_size: 滑动窗口大小，默认保留最近 20 条消息
+        """
         self._messages: deque[Message] = deque(maxlen=max_size)
         self.max_size = max_size
-        self.system_prompt: str | None = None
+        self.system_prompt: str | None = None  # 系统提示词（始终保留，不计入窗口）
 
     def set_system_prompt(self, prompt: str) -> None:
-        """设置系统提示词"""
+        """设置系统提示词（会出现在 to_messages() 的最前面）"""
         self.system_prompt = prompt
 
     def add(self, role: str, content: str, **metadata) -> None:
-        """添加一条消息"""
+        """添加一条消息（通用方法）
+
+        Args:
+            role: 消息角色
+            content: 消息文本
+            **metadata: 扩展字段（如 tool_calls, tool_call_id 等）
+        """
         self._messages.append(Message(role=role, content=content, metadata=metadata))
 
     def add_user(self, content: str) -> None:
+        """添加用户消息"""
         self.add("user", content)
 
     def add_assistant(self, content: str, tool_calls: list[dict] | None = None,
                       reasoning_content: str = "", reasoning_signature: str = "") -> None:
-        """添加 assistant 消息，可附带 tool_calls、reasoning_content 和 reasoning_signature"""
+        """添加 assistant 消息，可附带 tool_calls、reasoning_content 和 reasoning_signature
+
+        Args:
+            content: LLM 的文本回复
+            tool_calls: OpenAI 格式的工具调用数组
+            reasoning_content: 推理模型的内部思考过程（DeepSeek-R1）
+            reasoning_signature: 推理签名（Anthropic 扩展思考）
+        """
         kwargs = {"tool_calls": tool_calls or []}
         if reasoning_content:
             kwargs["reasoning_content"] = reasoning_content
@@ -154,17 +216,27 @@ class ShortTermMemory:
 
 
 # ============================================================
-# 工作记忆
+# 工作记忆 — 当前任务的运行时状态
 # ============================================================
 
 class WorkingMemory:
-    """工作记忆：当前任务状态、中间结果、规划进度"""
+    """工作记忆：当前任务状态、中间结果和规划进度
+
+    与短期记忆的区别：
+        • 短期记忆 = 对话流（消息序列），滑动窗口淘汰
+        • 工作记忆 = 任务状态（键值对），任务结束后重置
+
+    核心功能：
+        • 键值存储 — set/get/remove 管理临时变量
+        • 任务状态 — current_task / task_state 追踪任务生命周期
+        • 步骤结果 — 记录每个执行步骤的成功/失败和输出
+    """
 
     def __init__(self):
-        self._store: dict[str, Any] = {}
-        self._current_task: str = ""
-        self._task_state: str = "idle"  # idle | planning | executing | done
-        self._step_results: list[dict] = []
+        self._store: dict[str, Any] = {}      # 键值存储（临时变量）
+        self._current_task: str = ""           # 当前任务描述
+        self._task_state: str = "idle"         # 任务状态：idle | planning | executing | done
+        self._step_results: list[dict] = []    # 步骤执行结果列表
 
     # --- 键值存储 ---
     def set(self, key: str, value: Any) -> None:
@@ -254,34 +326,43 @@ class WorkingMemory:
 
 
 # ============================================================
-# 长期记忆
+# 长期记忆 — 持久化的知识存储（SQLite + 语义搜索）
 # ============================================================
 
 @dataclass
 class MemoryEntry:
-    """长期记忆条目"""
-    id: int | None
-    category: str       # "fact", "preference", "learning", "note"
-    content: str
-    created_at: str
-    updated_at: str
-    importance: int = 1  # 1-5, 越高越重要
+    """长期记忆条目
 
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "category": self.category,
-            "content": self.content,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "importance": self.importance,
-        }
+    Attributes:
+        id: 数据库主键（None 表示未保存）
+        category: 记忆分类 — "fact"(事实) | "preference"(偏好) | "learning"(学习) | "note"(笔记)
+        content: 记忆内容文本
+        created_at / updated_at: 创建/更新时间（ISO 格式字符串）
+        importance: 重要程度 1-5，越高越重要，影响搜索排序
+    """
+    id: int | None
+    category: str       # 分类："fact", "preference", "learning", "note"
+    content: str        # 记忆内容
+    created_at: str     # 创建时间（ISO 格式）
+    updated_at: str     # 更新时间（ISO 格式）
+    importance: int = 1 # 重要程度 1-5
 
 
 class LongTermMemory:
-    """长期记忆：持久化知识存储，默认使用 SQLite
+    """长期记忆 — SQLite 持久化 + 可选语义搜索
 
-    可选传递 embedding_fn 实现语义搜索：
+    启动时自动创建数据库和表。支持：
+        • remember()  — 添加/更新记忆（自动去重）
+        • recall()    — 检索相关记忆
+        • search()    — 关键词搜索
+        • semantic_search() — 语义搜索（需要 embedding_fn）
+        • forget()    — 删除记忆
+
+    使用方式：
+        # 基础用法（仅关键词搜索）
+        memory = LongTermMemory()
+
+        # 启用语义搜索（需要 LLM 支持 embeddings）
         memory = LongTermMemory(embedding_fn=lambda text: llm.create_embedding(text))
     """
 
@@ -292,8 +373,9 @@ class LongTermMemory:
     ):
         """
         Args:
-            db_path: SQLite 数据库路径
-            embedding_fn: 嵌入函数，接受文本返回向量列表。提供后启用语义搜索
+            db_path: SQLite 数据库路径（支持 ~ 展开）
+            embedding_fn: 嵌入函数，接受文本返回 float32 向量列表。
+                          提供后启用语义搜索功能。
         """
         self.db_path = os.path.expanduser(db_path)
         self._embedding_fn = embedding_fn

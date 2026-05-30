@@ -2,10 +2,27 @@
 规划与任务分解模块
 
 负责：
-1. 分析任务复杂度，决定是否需要规划
-2. 将复杂任务分解为可执行的步骤（含依赖关系）
-3. 管理执行进度，支持动态重新规划
-4. 检测可并行执行的步骤
+    1. 分析任务复杂度，决定是否需要规划
+    2. 将复杂任务分解为可执行的步骤（含依赖关系）
+    3. 管理执行进度，支持动态重新规划
+    4. 检测可并行执行的步骤
+
+核心流程：
+    用户输入 → estimate_complexity() → 复杂度 >= threshold?
+        ├── 否 → 跳过规划，直接进入 ReAct 循环
+        └── 是 → Planner.create_plan()
+                ├── 尝试 LLM 生成 JSON 格式计划
+                └── 失败 → 降级为简单文本拆分
+        执行中 → 检测失败 → Planner.replan()
+        全部完成 → 生成总结
+
+复杂度评估（启发式算法）:
+    • 文本长度 > 100 字符 +1, > 200 字符 +2
+    • 包含多任务连接词（"然后", "接着" 等）逐个 +1
+    • 包含复杂操作关键词（"分析", "比较", "下载" 等）逐个 +1
+    • 包含文件批量操作模式 +2
+    • 包含 URL +1
+    最终截断到 1-10 范围
 """
 
 from __future__ import annotations
@@ -27,16 +44,26 @@ logger = logging.getLogger(__name__)
 
 
 class StepStatus(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+    """步骤执行状态"""
+    PENDING = "pending"        # 等待执行
+    IN_PROGRESS = "in_progress" # 正在执行
+    COMPLETED = "completed"    # 已完成
+    FAILED = "failed"          # 执行失败
+    SKIPPED = "skipped"        # 已跳过
 
 
 @dataclass
 class PlanStep:
-    """执行计划中的单步"""
+    """执行计划中的单步
+
+    Attributes:
+        id: 步骤编号（从 1 开始）
+        description: 步骤描述（告知 LLM 这一步要做什么）
+        status: 当前状态
+        result: 执行结果文本
+        dependencies: 依赖的步骤 id 列表。空列表表示无依赖（可并行执行）
+        tool_hint: 建议使用的工具名（可选，辅助 LLM 选择工具）
+    """
     id: int
     description: str
     status: StepStatus = StepStatus.PENDING
@@ -45,6 +72,7 @@ class PlanStep:
     tool_hint: str = ""  # 建议使用的工具名
 
     def to_dict(self) -> dict:
+        """序列化为字典（用于 JSON 持久化）"""
         return {
             "id": self.id,
             "description": self.description,
@@ -55,17 +83,24 @@ class PlanStep:
         }
 
     def can_execute(self, completed_ids: set[int]) -> bool:
-        """检查是否所有依赖步骤都已完成"""
+        """检查是否所有依赖步骤都已完成（即可执行）"""
         return all(dep in completed_ids for dep in self.dependencies)
 
 
 @dataclass
 class Plan:
-    """执行计划"""
-    task: str
-    steps: list[PlanStep]
-    created_at: str = ""
-    current_step_index: int = 0
+    """执行计划 — 步骤列表 + 进度追踪
+
+    主要方法:
+        get_next_step()      — 获取下一个待执行步骤（考虑依赖关系）
+        get_executable_steps() — 获取所有当前可并行执行的步骤
+        mark_step()           — 更新步骤状态和结果
+        format_for_prompt()   — 生成注入 LLM 提示词的计划文本
+    """
+    task: str                          # 原始任务描述
+    steps: list[PlanStep]              # 步骤列表
+    created_at: str = ""               # 计划创建时间
+    current_step_index: int = 0        # 当前步骤索引
 
     @property
     def total_steps(self) -> int:
@@ -87,7 +122,11 @@ class Plan:
         return self.completed_steps / len(self.steps)
 
     def get_next_step(self) -> PlanStep | None:
-        """获取下一个待执行的步骤（考虑依赖关系）"""
+        """获取下一个待执行的步骤（考虑依赖关系）
+
+        遍历所有步骤，返回第一个状态为 PENDING 且所有依赖已完成的步骤。
+        如果所有步骤都已完成（或失败/跳过），返回 None。
+        """
         completed_ids = {
             s.id for s in self.steps if s.status == StepStatus.COMPLETED
         }
@@ -285,7 +324,17 @@ def _split_task(task: str) -> list[str]:
 # ============================================================
 
 class Planner:
-    """任务规划器"""
+    """任务规划器 — 复杂度评估 + LLM 任务分解 + 动态重规划
+
+    核心方法：
+        should_plan()   — 评估任务复杂度，决定是否启动规划
+        create_plan()   — 调用 LLM 生成 JSON 格式计划（失败时降级为文本拆分）
+        replan()        — 执行失败时调用 LLM 重新规划
+        plan_with_skill() — 使用技能模板生成计划
+
+    降级策略：
+        LLM 返回无效 JSON → 文本拆分 (_split_task) + 依赖推断 (_infer_dependencies)
+    """
 
     def __init__(
         self,
@@ -297,7 +346,11 @@ class Planner:
         """
         Args:
             llm_chat: LLM 聊天函数，签名: (messages: list[dict]) -> str
-            tools_description: 可用工具的描述文本
+                      使用 _simple_chat 模式（不带工具）
+            tools_description: 可用工具的描述文本（注入到规划提示词中）
+            skill_registry: 技能注册表（提供后会在规划提示词中注入技能元数据）
+            prompts: 提示词配置（自定义规划相关的提示词模板）
+        """
             skill_registry: 技能注册表（可选），提供后启用技能匹配快速路径
             prompts: 提示词配置（可选，默认使用 PromptsConfig()）
         """

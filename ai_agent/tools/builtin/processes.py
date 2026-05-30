@@ -1,8 +1,21 @@
 """
-进程管理工具
+进程管理工具 — 后台进程的完整生命周期管理
 
-提供后台进程的生命周期管理：启动、查询、终止。
+提供后台进程的启动、查询、轮询、终止功能。
 Shell 工具通过此模块的 ProcessManager 单例追踪后台进程。
+
+设计要点：
+    • ProcessManager 是模块级单例，跨工具调用共享状态
+    • 每个后台进程启动时分配独立的输出收集线程（daemon 线程）
+    • 线程安全：使用 threading.Lock 保护共享状态
+    • 优雅终止：先 SIGTERM → 等待 5s → SIGKILL
+
+生命周期：
+    start() → 启动进程 + 输出收集线程
+    poll()  → 检查进程是否仍在运行
+    read_output() → 读取已收集的输出
+    kill()  → 终止进程（SIGTERM → SIGKILL）
+    cleanup() → 清理已终止进程的记录
 """
 
 import os
@@ -17,7 +30,21 @@ from ai_agent.tools.base import tool
 
 @dataclass
 class ProcessInfo:
-    """后台进程的运行时信息"""
+    """后台进程的运行时信息
+
+    Attributes:
+        pid: 操作系统进程 ID
+        command: 执行的命令字符串
+        start_time: 启动时间戳
+        _process: subprocess.Popen 对象（内部使用）
+        _output_chunks: 输出片段列表（由后台线程填充）
+
+    Properties:
+        is_running: 进程是否仍在运行
+        returncode: 退出码（None = 仍在运行）
+        elapsed: 已运行秒数
+        output: 已收集的完整输出文本
+    """
     pid: int
     command: str
     start_time: float = field(default_factory=time.time)
@@ -46,11 +73,22 @@ class ProcessInfo:
 
 
 class ProcessManager:
-    """后台进程管理器（模块级单例）"""
+    """后台进程管理器 — 模块级单例，线程安全
+
+    职责：
+        • start() — 启动后台进程，分配输出收集线程
+        • kill()  — 优雅终止进程（SIGTERM → 5s → SIGKILL）
+        • get()   — 按 PID 获取进程信息
+        • list_all() — 列出所有追踪的进程
+        • poll()  — 轮询进程状态（返回退出码或 None）
+        • read_output() — 读取已收集的输出
+        • cleanup() — 清理已终止进程的记录
+        • kill_all() — 终止所有追踪的进程
+    """
 
     def __init__(self):
-        self._processes: dict[int, ProcessInfo] = {}
-        self._lock = threading.Lock()
+        self._processes: dict[int, ProcessInfo] = {}  # PID → ProcessInfo
+        self._lock = threading.Lock()  # 线程安全锁
 
     def start(self, command: str, **popen_kwargs) -> ProcessInfo:
         """启动后台进程并追踪（后台线程收集输出）"""

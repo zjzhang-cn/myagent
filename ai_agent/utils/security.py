@@ -1,10 +1,29 @@
 """
-安全工具模块
+安全工具模块 — 路径沙箱 + 命令白名单
 
-提供路径沙箱和命令白名单功能，防止 Agent 访问未授权资源或执行危险命令。
+提供双重安全防护，防止 Agent 访问未授权资源或执行危险命令：
 
-通过线程本地安全上下文，工具函数无需修改签名即可获取安全配置。
-Agent 在执行工具前自动设置上下文，工具在执行时读取。
+    第一道防线 — 路径沙箱:
+        sandbox_path() 实现两阶段路径验证：
+            Phase 1: normpath 规范化 → 检查是否在允许目录内（路径遍历检测）
+            Phase 2: realpath 解析符号链接 → 再次检查（符号链接逃逸检测）
+        写操作额外拦截：禁止写入 .git / .ssh / .gnupg 等敏感隐藏目录
+
+    第二道防线 — 命令白名单:
+        validate_shell_command() 实现双层检查：
+            Layer 1: 正则匹配危险模式（rm -rf /, fork bomb, curl|sh 等）
+            Layer 2: shlex 解析基础命令 → 检查是否在白名单中
+
+    安全上下文 — 线程本地:
+        SecurityContext 存储在 threading.local 中，工具无需修改函数签名。
+        Agent 在工具执行前自动设置上下文，工具通过 get_security_context() 读取。
+
+使用方式：
+    # 路径验证
+    safe_path = check_path(user_path, must_exist=True, for_write=False)
+
+    # 命令验证
+    is_safe, msg = check_command("ls -la")
 """
 
 import logging
@@ -18,7 +37,10 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-# 默认可信 Shell 命令白名单（只读 + 常用开发工具）
+# ----------------------------------------------------------
+# 默认安全 Shell 命令白名单（只读 + 常用开发工具）
+# ----------------------------------------------------------
+
 DEFAULT_SAFE_COMMANDS: set[str] = {
     # 文件查看
     "ls", "cat", "head", "tail", "less", "more",
@@ -40,15 +62,15 @@ DEFAULT_SAFE_COMMANDS: set[str] = {
     "python", "python3", "pip", "pip3",
     "git", "node", "npm", "npx",
     "make", "cmake",
-    # 文件操作（受限）
+    # 文件操作（受限，有额外警告）
     "mkdir", "cp", "mv", "touch", "rm",
-    # 权限
+    # 权限变更（受限，有额外警告）
     "chmod", "chown",
-    # 压缩
+    # 压缩归档
     "tar", "gzip", "gunzip", "zip", "unzip",
 }
 
-# 额外需要警告的命令（可能有风险）
+# 额外需要警告的命令（允许执行但可能有风险）
 _COMMANDS_NEED_WARNING: set[str] = {
     "rm", "chmod", "chown", "mv", "cp",
     "pip", "pip3", "npm", "npx",
@@ -64,16 +86,34 @@ def sandbox_path(
     security_ctx: "SecurityContext | None" = None,
 ) -> str:
     """
-    解析并验证路径是否在允许的目录内。
+    解析并验证路径是否在允许的目录内 — 两阶段验证
+
+    阶段一：路径遍历检测
+        1. 展开 ~ 和 ~user
+        2. 解析为绝对路径
+        3. normpath 规范化（消除 .., . 等）
+        4. 检查规范化路径是否在允许目录内（Path.relative_to）
+
+    阶段二：符号链接逃逸检测
+        5. realpath 解析符号链接得到真实路径
+        6. 再次检查真实路径是否在允许目录内
+        7. 对于不存在的路径，解析最近已存在父目录的 realpath
+
+    写操作额外检查：
+        8. 禁止写入 .git / .ssh / .gnupg / .config / .local 等敏感隐藏目录
+
+    存在性检查：
+        9. must_exist=True 时检查路径是否存在
 
     Args:
         path: 用户提供的路径（可能包含 ~, ../, 符号链接等）
         allowed_dirs: 允许访问的目录列表
-        must_exist: 是否要求路径必须已存在（读操作）
-        for_write: 是否为写操作（更严格的检查）
+        must_exist: 是否要求路径必须已存在（读操作设为 True）
+        for_write: 是否为写操作（触发额外安全检查）
+        security_ctx: 安全上下文（用于权限回调）
 
     Returns:
-        解析后的绝对路径
+        解析后的安全绝对路径
 
     Raises:
         PermissionError: 路径不在允许的目录内
@@ -189,15 +229,32 @@ def validate_shell_command(
     allow_all: bool = False,
 ) -> tuple[bool, str]:
     """
-    验证 Shell 命令是否在允许的范围内。
+    验证 Shell 命令是否在允许的范围内 — 双层检查
+
+    第一层 — 正则匹配危险模式:
+        • rm -rf / 或 rm -rf /* 等破坏性删除
+        • mkfs.* 文件系统创建
+        • dd if= 原始磁盘操作
+        • > /dev/sd* / > /dev/nvme* 重定向到磁盘设备
+        • chmod -R 777 / 或 chmod 777 / 全局权限变更
+        • fork bomb 模式 :(){ :|:& };:
+        • curl|sh 或 wget|sh 管道到 shell 执行
+        • sudo rm -rf /, sudo dd, sudo mkfs 等 sudo 危险操作
+
+    第二层 — 命令白名单检查:
+        使用 shlex.split 解析命令，提取基础命令名。
+        检查是否在 allowed_commands 白名单中。
+        对高风险命令（rm, chmod, curl 等）发出警告但允许执行。
 
     Args:
         command: 要执行的命令字符串
         allowed_commands: 允许的命令白名单
-        allow_all: 是否允许所有命令（跳过检查）
+        allow_all: 是否允许所有命令（跳过检查，仅用于调试）
 
     Returns:
-        (is_safe, message) 元组
+        (is_safe, message) 元组：
+            is_safe=True 表示命令可以执行
+            message 可能是空字符串（完全安全）或警告信息
     """
     if allow_all:
         return True, ""
@@ -260,7 +317,11 @@ def get_allowed_directories(config_dirs: list[str]) -> list[str]:
     """
     获取允许的目录列表，包含默认值。
 
-    始终包含当前工作目录，并去重、解析 ~ 路径。
+    处理逻辑：
+        1. 展开 ~ 路径
+        2. 转换为绝对路径
+        3. 始终包含当前工作目录
+        4. 去重并排序
     """
     dirs = set()
     for d in config_dirs:
@@ -281,21 +342,36 @@ def get_allowed_directories(config_dirs: list[str]) -> list[str]:
 
 @dataclass
 class SecurityContext:
-    """安全上下文，由 Agent 在工具执行前设置"""
+    """安全上下文 — 由 Agent 在工具执行前通过线程本地存储设置
+
+    设计目的：
+        工具函数（如 read_file, run_shell_command）无需修改函数签名即可获取安全配置。
+        Agent 在执行每个工具前自动设置 SecurityContext，工具通过 check_path/check_command 读取。
+
+    Attributes:
+        allowed_directories: 文件操作允许的目录列表
+        allowed_commands: Shell 命令白名单
+        allow_all_commands: 是否允许所有命令（跳过检查）
+        max_file_read_bytes: 读文件的最大字节数限制（默认 1MB）
+        enabled: 是否启用安全检查（设为 False 关闭所有检查）
+        on_permission_denied: 权限拒绝回调 (path, reason) → bool。
+                              返回 True 允许本次操作（覆盖拒绝决定）
+    """
     allowed_directories: list[str] = field(default_factory=lambda: ["."])
     allowed_commands: set[str] = field(default_factory=set)
     allow_all_commands: bool = False
-    max_file_read_bytes: int = 1_000_000  # 读文件最大字节数
+    max_file_read_bytes: int = 1_000_000  # 读文件最大字节数（1MB）
     enabled: bool = True  # 是否启用安全检查
     on_permission_denied: Callable[[str, str], bool] | None = None
     """权限拒绝回调 (path, reason) -> bool。返回 True 允许本次操作"""
 
 
+# 线程本地存储 — 每个线程独立的安全上下文
 _security_context = threading.local()
 
 
 def set_security_context(ctx: SecurityContext) -> None:
-    """设置当前线程的安全上下文"""
+    """设置当前线程的安全上下文（Agent 在工具执行前调用）"""
     _security_context.ctx = ctx
 
 

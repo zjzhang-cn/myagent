@@ -1,11 +1,23 @@
 """
-技能系统模块
+技能系统模块 — 遵循 Claude Code Skills 规范 (agentskills.io)
 
-遵循 Claude Code Skills 规范 (agentskills.io):
-- 每个 Skill 是一个目录，其中包含 Skill.md 文件
-- Skill.md 使用 YAML frontmatter 定义元数据（name, description, dependencies）
-- Markdown 正文包含技能指令（渐进式披露）
-- description 字段是 LLM 决定何时调用技能的关键依据
+规范要求:
+    • 每个 Skill 是一个目录，其中包含 Skill.md 文件
+    • Skill.md 使用 YAML frontmatter 定义元数据（name, description, dependencies）
+    • Markdown 正文包含技能指令（渐进式披露的第二层）
+    • description 字段是 LLM 决定何时调用技能的关键依据
+
+渐进式披露:
+    第一层 — 系统提示词注入技能元数据摘要（name + description）
+    第二层 — LLM 判断技能匹配后，调用 use_skill 工具加载完整 Skill.md 内容
+
+目录结构示例:
+    ~/.ai_agent/skills/
+    ├── code-review/
+    │   ├── Skill.md        # YAML frontmatter + Markdown 指令
+    │   └── checklist.json  # 技能所需的资源文件
+    └── project-setup/
+        └── Skill.md
 """
 
 from __future__ import annotations
@@ -23,15 +35,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # YAML frontmatter 解析（轻量级，不依赖 PyYAML）
 # ---------------------------------------------------------------------------
+# 使用正则表达式匹配 ---\n...\n--- 格式的 frontmatter
+# 解析为简单的 key: value 键值对
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)", re.DOTALL)
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """解析 Skill.md 中的 YAML frontmatter。
+    """解析 Skill.md 中的 YAML frontmatter
+
+    不使用 PyYAML 依赖，用简单正则 + 行解析实现：
+        ---
+        name: my-skill
+        description: 我的技能描述
+        dependencies: python>=3.8
+        ---
+        # 这是技能指令正文...
 
     Returns:
-        (metadata_dict, body_text)
+        (metadata_dict, body_text) 元组
     """
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -63,8 +85,10 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 class SkillStep:
     """技能中的单步模板（不含运行时状态）。
 
-    这是对 PlanStep 的轻量封装，用于在技能中预定义执行步骤。
-    dependencies 中的值为 1-based 步骤序号。
+    与 PlanStep 不同，SkillStep 是预定义的模板，不包含 status/result 等运行时字段。
+    dependencies 中的值为 1-based 步骤序号，表示依赖关系。
+
+    通过 to_plan_step() 转换为运行时的 PlanStep 对象。
     """
 
     description: str
@@ -95,17 +119,21 @@ class SkillStep:
 
 @dataclass
 class Skill:
-    """一个 Claude Code 兼容的技能。
+    """一个 Claude Code 兼容的技能（Skill）。
 
     规范字段（来自 YAML frontmatter）：
-    - name: 技能名称（最多 64 字符）
-    - description: 技能描述（最多 200 字符），LLM 据此决定何时调用
-    - dependencies: 可选，如 "python>=3.8, pandas>=1.5.0"
+        name: 技能名称（最多 64 字符，超出自动截断）
+        description: 技能描述（最多 200 字符，LLM 据此决定何时调用）
+        dependencies: 可选依赖声明，如 "python>=3.8, pandas>=1.5.0"
 
     扩展字段：
-    - body: Skill.md 的 Markdown 正文（渐进式披露的第二层）
-    - path: 技能目录的路径
-    - steps: 可选的预定义执行步骤
+        body: Skill.md 的 Markdown 正文（渐进式披露的第二层，LLM 调用 use_skill 后获取）
+        path: 技能目录的绝对路径
+        steps: 可选的预定义执行步骤模板
+
+    与 Plan 的关系：
+        to_plan(task) 将技能步骤模板转换为可执行的 Plan 对象。
+        如果技能没有预定义步骤，则创建一个单步引导计划。
     """
 
     name: str
@@ -178,12 +206,16 @@ class Skill:
 
 
 class SkillRegistry:
-    """技能注册表，管理所有已加载的技能。
+    """技能注册表 — 管理所有已加载的技能
 
     支持：
-    - 按名称注册/注销/查询技能
-    - 生成技能元数据摘要（用于注入系统提示词，渐进式披露第一层）
-    - 按名称获取完整技能内容（渐进式披露第二层）
+        • 按名称注册/注销/查询技能
+        • 生成技能元数据摘要（注入系统提示词，渐进式披露第一层）
+        • 按名称查找（大小写不敏感，部分匹配）
+        • 按名称获取完整技能内容（渐进式披露第二层）
+
+    describe_for_prompt() 生成的摘要仅包含 name + description，
+    不含 body。LLM 看到摘要后，通过 use_skill 工具按需加载完整内容。
     """
 
     def __init__(self):
@@ -278,18 +310,32 @@ def _load_skill_from_dir(skill_dir: str) -> Skill | None:
 
 
 def load_skills_from_directory(base_dir: str) -> list[Skill]:
-    """从基础目录中加载所有技能。
+    """从基础目录中扫描并加载所有技能
 
     扫描 base_dir 下的每个子目录，对其中的 Skill.md 进行解析。
-    同时兼容旧格式：base_dir 下直接放置的 .json 文件。
 
-    目录结构示例:
-        ~/.ai_agent/skills/
-        ├── my-skill/
+    目录结构约定:
+        base_dir/
+        ├── skill-a/
+        │   └── Skill.md       # 必需：YAML frontmatter + Markdown 指令
+        ├── skill-b/
         │   ├── Skill.md
-        │   └── resources/
-        └── another-skill/
-            └── Skill.md
+        │   └── resources/     # 可选：技能所需的资源文件
+        └── ...（更多技能目录）
+
+    Skill.md 格式:
+        ---
+        name: 技能名称
+        description: 技能描述（LLM 据此判断何时调用）
+        dependencies: python>=3.10  (可选)
+        ---
+        # 技能指令正文（Markdown 格式）
+
+    Args:
+        base_dir: 包含技能子目录的基础目录路径（支持 ~ 展开）
+
+    Returns:
+        成功加载的 Skill 对象列表（解析失败的技能被跳过并记录警告）
     """
     skills: list[Skill] = []
     base_dir = os.path.expanduser(base_dir)
