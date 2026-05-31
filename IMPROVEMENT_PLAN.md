@@ -2,13 +2,13 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-30（全面代码审查，合并 OPTIMIZATION_SUGGESTIONS.md，新增 12 项优化建议）
+最后更新: 2026-05-31（重新扫描，发现 1 个测试回归 + 1 个代码缺陷）
 
 ---
 
 ## 优先级 P0 — 关键缺陷
 
-### 1. 测试覆盖  ✅ 已完成 (2026-05-16)
+### 1. 测试覆盖  ✅ 已完成 (2026-05-16) | ⚠️ 回归 (2026-05-31)
 
 - **问题**: 整个项目零测试（无单元测试、集成测试），重构风险极高
 - **方案**: 使用 `pytest` 补齐测试覆盖
@@ -16,6 +16,16 @@
   - 测试基础设施: `conftest.py` 公共 fixture、临时目录隔离
   - 测试文件 7 个，测试用例 175 个
   - 覆盖率验证: `pytest` + 覆盖率报告
+- **回归**: 2026-05-31 扫描发现 `test_memory_entry_to_dict` 失败（174/175），`MemoryEntry` 类缺少 `to_dict()` 方法，详见 #1a
+
+### 1a. `MemoryEntry` 缺少 `to_dict()` 方法导致测试失败 ⚠️ 新增 (2026-05-31)
+
+- **问题**: `MemoryEntry` 类（`memory.py:333-352`）使用类属性注解风格定义字段（`id: int | None`, `category: str` 等），但没有 `@dataclass` 装饰器，也没有实现 `to_dict()` 方法。测试 `test_memory_entry_to_dict` 调用 `entry.to_dict()` 抛出 `AttributeError`
+- **影响**: 测试套件 174/175 通过，1 个失败。任何依赖 `MemoryEntry.to_dict()` 的代码也会在运行时崩溃
+- **方案**: 二选一
+  - A) 添加 `@dataclass` 装饰器 + `to_dict()` 方法
+  - B) 仅在类中添加 `to_dict()` 方法，手动序列化字段
+- **位置**: `ai_agent/core/memory.py:333-352`（类定义）、`tests/test_memory.py:343-347`（失败测试）
 
 ### 2. 错误恢复差异化策略
 
