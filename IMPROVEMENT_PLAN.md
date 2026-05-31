@@ -2,7 +2,7 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-31（重新扫描，发现 1 个测试回归 + 1 个代码缺陷）
+最后更新: 2026-05-31（重新扫描 + Token 优化专项分析，新增 10 项 Token 节省建议）
 
 ---
 
@@ -289,6 +289,98 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 
 ---
 
+## Token 优化专项 ⚠️ 新增 (2026-05-31)
+
+_对项目 token 消耗路径的全面分析。一轮 5 步骤的典型任务，综合优化后可节省约 40-60% token 消耗。_
+
+### T1. 系统提示词每轮完整重建（最大浪费源）⚠️ P0
+
+- **问题**: `_build_messages()` 每次 LLM 调用都将完整的 system prompt（工具描述、计划、技能元数据、格式说明）拼成一条 system 消息。5 轮对话中工具描述被发送 5 遍，固定开销约 600-1400 tokens/轮
+- **方案**: 
+  - 利用 OpenAI/Anthropic 原生 `system` 角色，首次注入后复用
+  - 工具描述、格式说明仅在首次或变更时注入
+  - 计划进度提示改为简短 user 消息（如 `"next: Step 3"`），不在 system prompt 中展开
+- **预估节省**: 5 轮任务可节省 3,000–7,000 tokens
+- **位置**: `ai_agent/core/agent.py:_build_messages()`
+
+### T2. 工具描述格式过于冗长 ⚠️ P1
+
+- **问题**: `describe_for_prompt()` 输出 `- read_file(path: string, start_line: int?, end_line: int?): 读取文件内容...`，参数类型和可选标记对 LLM 是冗余信息（LLM 已从 function schema 获知）
+- **方案**: 紧凑格式：`read_file(path,start_line,end_line) — 读取文件`，省略类型和 `?` 标记。预估减少 30-40% 字符量
+- **位置**: `ai_agent/tools/registry.py:describe_for_prompt()`
+
+### T3. 原生 Function Calling 时跳过文本格式说明 ⚠️ P1
+
+- **问题**: `tool_call_format_with_plan` / `tool_call_format_no_plan` 注入约 80 tokens 的 JSON 格式说明文本。当 LLM 使用原生 Function Calling（OpenAI `tools` 参数 / Anthropic `tools` 参数）时，这些文本格式说明完全不需要
+- **方案**: 检测 LLM 是否支持原生 FC，支持时跳过格式说明注入，不支持时精简为一行 `'工具调用: {"tool_call":{"name":"x","arguments":{}}}'`
+- **位置**: `ai_agent/prompts.py:tool_call_format_with_plan` / `tool_call_format_no_plan`、`ai_agent/core/agent.py:_build_messages()`
+
+### T4. 工具结果双重记录（Bug）⚠️ P0
+
+- **问题**: 每次工具调用后，结果以两种格式写入短期记忆：① `observation_parts` 拼接的 `[工具: xxx]\n输入: ...\n输出: ...` ② `add_tool_result()` 调用的 tool 角色消息。同一结果出现两次
+- **方案**: 移除 `observation_parts` 的冗余写入，仅保留 `add_tool_result` 一条路径。`observation_parts` 仅用于日志/回调
+- **预估节省**: 每次工具调用节省 50–200 tokens
+- **位置**: `ai_agent/core/agent.py:~840` (observation_parts 拼接) + `~768` (add_tool_result)
+
+### T5. 工具结果未智能摘要 ⚠️ P1
+
+- **问题**: 长结果仅用 `truncate_text` 粗暴截断到 `max_tool_result_chars`（默认 32K 字符 ≈ 8-12K tokens）。对 HTML 抓取、大文件读取等场景，保留了大量无意义内容
+- **方案**:
+  - 结构化截断：保留开头+结尾，中间 `[省略 N 行]`
+  - `search_web` 结果只保留标题+URL+前 200 字符
+  - 对话级工具结果去重：同一工具+相同参数不重复发送大结果
+- **位置**: `ai_agent/utils/token_utils.py:truncate_text()`、工具结果写入路径
+
+### T6. 计划展示占用过多 Token ⚠️ P1
+
+- **问题**: `plan_header` 注入完整计划表格（状态图标+描述+依赖+结果），5 步骤约 300-500 tokens
+- **方案**:
+  - 已完成步骤只保留 `✅ S1 完成`
+  - 待执行步骤紧凑格式：`待执行: S3(写报告) → S4(格式检查)`
+  - `plan_must_call_tools` + `plan_json_only` 合并为一行
+  - 注入方式从 system 消息改为简短 user 消息
+- **位置**: `ai_agent/prompts.py:plan_header` / `plan_executable_single` / `plan_executable_multi` / `plan_must_call_tools` / `plan_json_only`
+
+### T7. `no_toolcall_hint` 过于冗长 ⚠️ P2
+
+- **问题**: 未调用工具时的提醒约 120 tokens，包含完整 JSON 格式示例
+- **方案**: 精简为一行 `[继续] 步骤 3/5: 搜索框架 → 调用 search_web`，节省 ~70%
+- **位置**: `ai_agent/prompts.py:no_toolcall_hint`
+
+### T8. 系统提示词可缩短 ⚠️ P2
+
+- **问题**: `system_prompt` 包含 3 条行为准则和冗长建议，约 80 tokens。核心需求可压缩为 2-3 句话
+- **方案**: `"你是 AI Agent，用中文回复。信息不足时反问用户，不要猜测。完成后基于工具结果总结。"`（~25 tokens）
+- **位置**: `ai_agent/prompts.py:system_prompt`
+
+### T9. 增量消息构建（架构优化）💡 P2
+
+- **问题**: `_build_messages()` 每次从零构建完整消息列表，对长对话历史浪费 CPU
+- **方案**: 缓存 system 消息部分，仅当 plan/skills 变更时重建
+- **位置**: `ai_agent/core/agent.py:_build_messages()`
+
+### T10. 工具结果无信息增量判定 💡 P2
+
+- **问题**: `delete_file` 返回 `"文件已删除"` 也完整写入短期记忆，无信息增量
+- **方案**: 对已知的确认性结果（如文件操作成功、命令执行完成）自动压缩为 `"tool_name: ✓"`，保留详细结果在 `working memory` 供后续引用
+- **位置**: 工具结果写入路径
+
+### Token 优化预计效果
+
+| 优化项 | 难度 | 每轮节省 | 5轮任务总节省 |
+|--------|------|----------|---------------|
+| T1 提示词不重复注入 | 中 | 600-1400 | 3,000-7,000 |
+| T2 工具描述紧凑 | 低 | 60-200 | 60-200 |
+| T3 跳过FC格式说明 | 低 | 80 | 80 |
+| T4 工具结果去重 | 低 | 50-200/次 | 250-1,000 |
+| T5 智能摘要 | 中 | 200-2,000/次 | 1,000-10,000 |
+| T6 计划紧凑展示 | 低 | 100-300 | 500-1,500 |
+| T7 no_toolcall精简 | 低 | 70/次 | 70-210 |
+| T8 系统提示词精简 | 低 | 55 | 55 |
+| **综合** | — | — | **~5,000-20,000 (40-60%)** |
+
+---
+
 ## 优先级 P3 — 代码质量
 
 | # | 问题 | 方案 |
@@ -331,7 +423,10 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 4b   SQLite check_same_thread           4e   _emit 异常提升到 warning
 4g   choices 空数组检查                  5c   Anthropic embedding 警告
 10a  replan/failed_steps 用 prompts     35   类型标注修正
-37   更新 Anthropic 默认 model
+37   更新 Anthropic 默认 model          1a   MemoryEntry to_dict() 回归
+T3   跳过FC格式说明（原生FC时）          T4   工具结果双重记录修复
+T7   no_toolcall 精简                    T8   系统提示词精简
+T2   工具描述紧凑格式
 ```
 
 ### 第二轮：中等改动（3-5 天）
@@ -341,7 +436,8 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 8c   工具断路器                          2    错误恢复差异化策略
 5a   o1/o3 streaming 兼容               5b   Anthropic 流式 usage 修复
 13a  SIGINT 中断改进                     23   命令白名单统一
-34   重试参数可配置
+34   重试参数可配置                      T1   系统提示词增量注入
+T6   计划紧凑展示                        T10  工具结果无增量判定
 ```
 
 ### 第三轮：大型重构（5-10 天）
@@ -350,7 +446,8 @@ _已通过 add() 同步生成嵌入向量 + semantic_search() 语义搜索实现
 8e   状态压缩内存优化                    7    Shell 深度防御
 11   Token 用量监控                      17   首次运行引导
 14   搜索引擎 Provider 冗余              15   多模态工具扩展
-6    API Server 模式
+6    API Server 模式                     T5   工具结果智能摘要
+T9   增量消息构建缓存
 ```
 
 ### 持续改进
