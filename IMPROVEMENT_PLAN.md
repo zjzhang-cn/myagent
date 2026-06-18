@@ -2,7 +2,7 @@
 
 生成日期: 2026-05-15
 基于代码版本: cc559cc
-最后更新: 2026-05-31（重新扫描 + Token 优化专项分析，新增 10 项 Token 节省建议）
+最后更新: 2026-06-18（全面代码审查，新增架构与能力缺口分析 + 14 项改进建议）
 
 ---
 
@@ -415,6 +415,200 @@ _对项目 token 消耗路径的全面分析。一轮 5 步骤的典型任务，
 
 ---
 
+## 架构与能力缺口分析 ⚠️ 新增 (2026-06-18)
+
+_对 Agent 整体架构的深度审查，发现 14 项现有代码未覆盖的关键能力缺失。_
+
+### A1. Async 异步支持 ⚠️ P0
+
+- **问题**: 整个 Agent 是纯同步的。`agent.run()` 是阻塞调用，无法嵌入 FastAPI、aiohttp 等异步框架，无法并发运行多个 Agent。`OpenAILLM.chat()` 使用同步 SDK，工具执行用 `ThreadPoolExecutor`
+- **影响**: 无法用于 Web API Server、无法实现多 Agent 并发、无法在异步事件循环中使用
+- **方案**:
+  - `OpenAILLM` 新增 `achat()` / `achat_stream()` 基于 `httpx.AsyncClient`
+  - `Agent` 新增 `arun()` 异步入口，工具执行改用 `asyncio.gather()`
+  - 流式回调升级为 `async for event in agent.astream("...")`
+  - 保持同步 API 不变（向后兼容），异步作为新增层
+- **位置**: `ai_agent/llm/openai.py`, `ai_agent/core/agent.py`
+- **预估工作量**: 5-7 天
+
+### A2. MCP (Model Context Protocol) 支持 ⚠️ P1
+
+- **问题**: Agent 仅支持自有 `@tool` 装饰器和动态加载，无法接入 MCP 生态（IDE、数据库、GitHub 等标准化工具服务）。MCP 已成为 AI Agent 工具发现的事实标准
+- **方案**:
+  - 新增 `ai_agent/tools/mcp.py` — `MCPToolProvider` 适配器
+  - 将 MCP 工具自动转换为 `ToolDefinition`，统一注册到 `ToolRegistry`
+  - Agent 启动时同时加载本地工具 + MCP 远程工具
+  - 配置项 `mcp_servers: list[dict]` 支持多 MCP 服务端
+- **位置**: 新增 `ai_agent/tools/mcp.py`，修改 `ai_agent/config.py`, `ai_agent/main.py`
+- **预估工作量**: 3-5 天
+
+### A3. Structured Output（结构化输出）⚠️ P1
+
+- **问题**: `agent.run()` 只返回 `AgentResult.answer`（纯文本）。用户无法指定输出 schema 并获得 JSON 格式的结构化结果。OpenAI/Anthropic 均支持 JSON schema 强制输出
+- **方案**:
+  - `agent.run()` 新增 `output_schema: dict | None` 参数
+  - 传入 schema 时自动添加 `response_format={"type": "json_schema", ...}` 到 LLM 请求
+  - `AgentResult` 新增 `parsed: dict | None` 字段
+  - 校验失败时自动重试（最多 1 次）
+- **位置**: `ai_agent/core/agent.py`, `ai_agent/llm/openai.py`
+- **预估工作量**: 2-3 天
+
+### A4. 多 Agent 协作/委派 ⚠️ P2
+
+- **问题**: 单 Agent 处理所有任务，无法拆分工作到专业化的子 Agent。缺少 `Orchestrator` 模式
+- **方案**:
+  - 新增 `ai_agent/core/sub_agent.py` — `SubAgent` 类（继承 Agent，限定工具和任务范围）
+  - 新增 `run_sub_agent(task, tools, max_iterations)` 内置工具，允许主 Agent 委派子任务
+  - 子 Agent 结果注入主 Agent 上下文
+- **位置**: 新增 `ai_agent/core/sub_agent.py`，修改 `ai_agent/core/agent.py`
+- **预估工作量**: 5-7 天
+
+### A5. Token 用量追踪与预算控制 ⚠️ P0
+
+- **问题**: `LLMResponse.usage` 有 token 数据但从未被聚合。没有会话级累计统计、没有预算上限、没有消耗报告
+- **方案**:
+  - Agent 新增 `_token_stats: TokenStats` 属性，累计 prompt/completion/total tokens
+  - `AgentConfig` 新增 `token_budget: int = 0`（0=不限制）
+  - 达到预算 80% 时 warning，达到 100% 时自动停止并返回已完成的部分结果
+  - `AgentResult` 新增 `token_usage: dict` 字段
+  - 交互模式结束打印统计: `(本次消耗: 12,345 tokens ≈ $0.03)`
+- **位置**: `ai_agent/core/agent.py`, `ai_agent/config.py`
+- **预估工作量**: 1-2 天
+
+### A6. 模型 Fallback 链 ⚠️ P1
+
+- **问题**: API 调用失败时直接返回错误文本，没有自动切换到备用模型。单一 API 不可用会导致整个任务失败
+- **方案**:
+  - `AgentConfig` 新增 `fallback_models: list[str] = []`
+  - `_call_llm()` 捕获 `APIConnectionError` / `APIStatusError(5xx)` 时自动切换下一个模型
+  - 日志记录切换事件: `[Fallback] gpt-4o 不可用，切换到 deepseek-chat`
+  - 每次切换独立重试，所有模型均失败时返回最终错误
+- **位置**: `ai_agent/core/agent.py`, `ai_agent/config.py`
+- **预估工作量**: 1-2 天
+
+### A7. Eval / Benchmark 框架 ⚠️ P2
+
+- **问题**: 175 个单元测试测的是模块正确性，但没有评估 Agent 实际任务完成质量的框架。无法量化不同模型/配置的效果差异
+- **方案**:
+  - 新增 `evals/` 目录，定义标准任务集（搜索+保存、代码分析、多步规划等）
+  - 每个任务定义: `{input, expected_tools, expected_output_contains, max_iterations}`
+  - 自动运行 + 评分（工具调用是否正确、结果是否包含关键词、是否在迭代限制内完成）
+  - 支持多模型对比: `uv run evals --models gpt-4o,deepseek-chat`
+- **位置**: 新增 `evals/` 目录
+- **预估工作量**: 3-5 天
+
+### A8. 对话导出 ⚠️ P2
+
+- **问题**: 交互结束后对话只存在于短期记忆（会被裁剪）或 state 文件（JSON 格式不直观）。无法导出为可读格式
+- **方案**:
+  - 新增 `/export [格式]` 交互命令（支持 markdown / html / jsonl）
+  - Markdown 导出: 用户消息、Agent 思考、工具调用及结果、最终回复
+  - 工具调用轨迹导出: 工具名 + 参数 + 结果 + 耗时
+  - 编程接口: `agent.export_conversation(format="markdown") -> str`
+- **位置**: `ai_agent/main.py`（CLI 命令），`ai_agent/core/agent.py`（导出方法）
+- **预估工作量**: 1-2 天
+
+### A9. 工具级别超时控制 ⚠️ P0
+
+- **问题**: 工具执行没有统一的超时机制。`web_search.py` 的 `timeout=15` 是写死的，其他工具（如 `run_shell_command` 之外的工具）没有超时保护。一个挂起的工具会阻塞整个 ReAct 循环
+- **方案**:
+  - `@tool` 装饰器新增 `timeout: int = 0` 参数（0=不限制，单位秒）
+  - `ToolDefinition` 新增 `timeout` 字段
+  - `ToolRegistry.execute()` 使用 `concurrent.futures.ThreadPoolExecutor` + `future.result(timeout=...)` 包裹
+  - 超时返回友好提示: `"工具 'xxx' 执行超时 (30s)"`
+- **位置**: `ai_agent/tools/base.py`, `ai_agent/tools/registry.py`
+- **预估工作量**: 1 天
+
+### A10. 工具执行审计日志 ⚠️ P1
+
+- **问题**: 工具调用历史仅存在于短期记忆（会被裁剪丢弃）。缺少独立的、不随上下文裁剪而丢失的工具调用审计追踪
+- **方案**:
+  - Agent 新增 `_tool_audit_log: list[ToolAuditEntry]` 属性
+  - 每次工具调用记录: `{tool_name, arguments, result_summary, duration_ms, success, iteration}`
+  - `AgentResult` 新增 `tool_audit: list[dict]` 字段
+  - 可选持久化到 JSONL 文件（与 `--log-file` 联动）
+- **位置**: `ai_agent/core/agent.py`
+- **预估工作量**: 1 天
+
+### A11. Human-in-the-Loop 增强 ⚠️ P1
+
+- **问题**: 当前仅有 `auto_approve` 和简单的 y/n 确认。用户无法在执行中途注入新指令、无法在计划确认后执行、无法暂停/恢复
+- **方案**:
+  - 计划确认模式: `AgentConfig(plan_confirm=True)` → 生成计划后暂停，用户确认/修改后执行
+  - 中途注入: 交互模式下支持 `Ctrl+Z` 暂停当前执行 → 输入新指令 → 继续或终止
+  - `agent.pause()` / `agent.resume()` API
+- **位置**: `ai_agent/core/agent.py`, `ai_agent/main.py`
+- **预估工作量**: 3-5 天
+
+### A12. Config 参数校验 ⚠️ P1
+
+- **问题**: `AgentConfig.__post_init__()` 仅展开 `~` 路径，不做任何参数范围校验。`temperature=5.0`、`max_context_tokens=-1`、`model=""` 等非法值不会报错
+- **方案**:
+  - `__post_init__()` 中添加校验:
+    - `0.0 <= temperature <= 2.0`
+    - `max_context_tokens > 0`
+    - `max_tokens > 0`
+    - `model` 非空
+    - `max_iterations >= 0`
+    - `1 <= plan_threshold_complexity <= 10`
+  - 校验失败抛出 `ValueError` 并附带明确错误信息
+- **位置**: `ai_agent/config.py`
+- **预估工作量**: 0.5 天
+
+### A13. 缺失的内置工具 ⚠️ P2
+
+- **问题**: 当前仅有 10 个内置工具（file_ops × 4, shell × 1, web × 2, processes × 3），缺少一些常用能力
+- **方案**: 新增以下内置工具
+
+| 工具 | 描述 | 优先级 |
+|------|------|--------|
+| `search_files(pattern, path?)` | 按正则/通配符搜索文件内容（类 grep -r） | P1 |
+| `execute_python(code)` | 安全执行 Python 代码（沙箱内，受限 import） | P2 |
+| `read_json(path, query?)` | 解析 JSON/YAML 文件，支持 JSONPath 查询 | P2 |
+| `diff_files(path_a, path_b)` | 对比两个文件的差异 | P3 |
+
+- **位置**: `ai_agent/tools/builtin/`
+- **预估工作量**: 2-3 天
+
+### A14. 首次运行引导（Onboarding）⚠️ P1
+
+- **问题**: 未配置 API key 时直接 `Missing credentials` 报错退出，体验突兀。新用户不知道如何开始
+- **方案**:
+  - 检测到未配置时输出交互式引导菜单:
+    ```
+    欢迎使用 AI Agent！检测到尚未配置 API 密钥。
+    1) 输入 OpenAI API Key
+    2) 输入 DeepSeek API Key
+    3) 输入自定义 API 地址 + Key
+    4) 查看配置说明
+    5) 退出
+    ```
+  - 自动创建 `.env` 文件并写入配置
+  - 配置完成后自动运行一次简单的测试对话
+- **位置**: `ai_agent/main.py`
+- **预估工作量**: 1 天
+
+### 架构缺口总览
+
+| 编号 | 缺口 | 优先级 | 难度 | 预估工作量 |
+|------|------|--------|------|------------|
+| A1 | Async 异步支持 | P0 | 高 | 5-7 天 |
+| A2 | MCP 协议支持 | P1 | 中 | 3-5 天 |
+| A3 | Structured Output | P1 | 中 | 2-3 天 |
+| A4 | 多 Agent 协作 | P2 | 高 | 5-7 天 |
+| A5 | Token 追踪 + 预算控制 | P0 | 低 | 1-2 天 |
+| A6 | 模型 Fallback 链 | P1 | 低 | 1-2 天 |
+| A7 | Eval / Benchmark 框架 | P2 | 中 | 3-5 天 |
+| A8 | 对话导出 | P2 | 低 | 1-2 天 |
+| A9 | 工具级别超时 | P0 | 低 | 1 天 |
+| A10 | 工具审计日志 | P1 | 低 | 1 天 |
+| A11 | Human-in-the-Loop 增强 | P1 | 中 | 3-5 天 |
+| A12 | Config 参数校验 | P1 | 低 | 0.5 天 |
+| A13 | 缺失的内置工具 | P2 | 低 | 2-3 天 |
+| A14 | 首次运行引导 | P1 | 低 | 1 天 |
+
+---
+
 ## 实施建议
 
 ### 第一轮：快速修复（1-2 天）
@@ -427,6 +621,8 @@ _对项目 token 消耗路径的全面分析。一轮 5 步骤的典型任务，
 T3   跳过FC格式说明（原生FC时）          T4   工具结果双重记录修复
 T7   no_toolcall 精简                    T8   系统提示词精简
 T2   工具描述紧凑格式
+A5   Token 追踪 + 预算控制              A9   工具级别超时控制
+A10  工具审计日志                        A12  Config 参数校验
 ```
 
 ### 第二轮：中等改动（3-5 天）
@@ -438,6 +634,8 @@ T2   工具描述紧凑格式
 13a  SIGINT 中断改进                     23   命令白名单统一
 34   重试参数可配置                      T1   系统提示词增量注入
 T6   计划紧凑展示                        T10  工具结果无增量判定
+A6   模型 Fallback 链                    A14  首次运行引导
+A3   Structured Output
 ```
 
 ### 第三轮：大型重构（5-10 天）
@@ -448,6 +646,14 @@ T6   计划紧凑展示                        T10  工具结果无增量判定
 14   搜索引擎 Provider 冗余              15   多模态工具扩展
 6    API Server 模式                     T5   工具结果智能摘要
 T9   增量消息构建缓存
+A1   Async 异步支持                      A2   MCP 协议支持
+A11  Human-in-the-Loop 增强
+```
+
+### 第四轮：能力扩展（10+ 天）
+```
+A4   多 Agent 协作                      A7   Eval / Benchmark 框架
+A8   对话导出                            A13  新增内置工具
 ```
 
 ### 持续改进
